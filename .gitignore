@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+backend/.venv/
+backend/.env
+
+# Local data and uploaded evidence
+backend/db.sqlite3
+backend/test.sqlite3
+backend/media/
+
+# Node / Expo
+mobile/node_modules/
+mobile/.expo/
+mobile/.env.local
+mobile/dist/
