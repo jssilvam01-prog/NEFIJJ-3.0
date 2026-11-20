@@ -15,29 +15,6 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name='User',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('password', models.CharField(max_length=128, verbose_name='password')),
-                ('last_login', models.DateTimeField(blank=True, null=True, verbose_name='last login')),
-                ('username', models.CharField(max_length=150, unique=True)),
-                ('first_name', models.CharField(blank=True, max_length=150)),
-                ('last_name', models.CharField(blank=True, max_length=150)),
-                ('email', models.EmailField(max_length=254, unique=True)),
-                ('is_staff', models.BooleanField(default=False)),
-                ('is_active', models.BooleanField(default=True)),
-                ('is_superuser', models.BooleanField(default=False)),
-                ('date_joined', models.DateTimeField(auto_now_add=True)),
-                ('role', models.CharField(choices=[('student', 'Usuario'), ('technician', 'Técnico'), ('admin', 'Administrador de organización'), ('superadmin', 'Superadministrador')], default='student', max_length=20)),
-            ],
-            options={
-                'db_table': 'accounts_user',
-            },
-            managers=[
-                ('objects', accounts.models.UserManager()),
-            ],
-        ),
-        migrations.CreateModel(
             name='Organization',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
@@ -68,6 +45,30 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
+            name='User',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('password', models.CharField(max_length=128, verbose_name='password')),
+                ('last_login', models.DateTimeField(blank=True, null=True, verbose_name='last login')),
+                ('username', models.CharField(max_length=150, unique=True)),
+                ('first_name', models.CharField(blank=True, max_length=150)),
+                ('last_name', models.CharField(blank=True, max_length=150)),
+                ('email', models.EmailField(max_length=254, unique=True)),
+                ('is_staff', models.BooleanField(default=False)),
+                ('is_active', models.BooleanField(default=True)),
+                ('is_superuser', models.BooleanField(default=False)),
+                ('date_joined', models.DateTimeField(auto_now_add=True)),
+                ('role', models.CharField(choices=[('student', 'Usuario'), ('technician', 'Técnico'), ('admin', 'Administrador de organización'), ('superadmin', 'Superadministrador')], default='student', max_length=20)),
+                ('location', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='users', to='accounts.location')),
+            ],
+            options={
+                'db_table': 'accounts_user',
+            },
+            managers=[
+                ('objects', accounts.models.UserManager()),
+            ],
+        ),
+        migrations.CreateModel(
             name='OrganizationMembership',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
@@ -80,15 +81,9 @@ class Migration(migrations.Migration):
             ],
             options={
                 'db_table': 'accounts_organizationmembership',
+                'constraints': [
+                    models.UniqueConstraint(fields=('organization', 'user'), name='unique_user_organization_membership'),
+                ],
             },
-        ),
-        migrations.AddField(
-            model_name='user',
-            name='location',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='users', to='accounts.location'),
-        ),
-        migrations.AddConstraint(
-            model_name='organizationmembership',
-            constraint=models.UniqueConstraint(fields=('organization', 'user'), name='unique_user_organization_membership'),
         ),
     ]
