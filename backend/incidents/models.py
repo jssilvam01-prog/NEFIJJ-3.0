@@ -9,7 +9,7 @@ from accounts.models import Location, Organization, User
 
 class LegacyIntegerForeignKey(models.ForeignKey):
     def db_type(self, connection):
-        return models.IntegerField().db_type(connection)
+        return models.BigIntegerField().db_type(connection)
 
 
 def incident_evidence_path(instance, filename):
