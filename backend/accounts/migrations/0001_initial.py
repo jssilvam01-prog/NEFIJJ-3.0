@@ -38,20 +38,6 @@ class Migration(migrations.Migration):
             ],
         ),
         migrations.CreateModel(
-            name='Location',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('name', models.CharField(max_length=150)),
-                ('code', models.CharField(max_length=30, unique=True)),
-                ('is_active', models.BooleanField(default=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-            ],
-            options={
-                'db_table': 'accounts_location',
-                'ordering': ['organization__name', 'name'],
-            },
-        ),
-        migrations.CreateModel(
             name='Organization',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
@@ -63,6 +49,21 @@ class Migration(migrations.Migration):
             ],
             options={
                 'db_table': 'accounts_organization',
+                'ordering': ['name'],
+            },
+        ),
+        migrations.CreateModel(
+            name='Location',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('name', models.CharField(max_length=150)),
+                ('code', models.CharField(max_length=30, unique=True)),
+                ('is_active', models.BooleanField(default=True)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('organization', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='locations', to='accounts.organization')),
+            ],
+            options={
+                'db_table': 'accounts_location',
                 'ordering': ['name'],
             },
         ),
@@ -80,11 +81,6 @@ class Migration(migrations.Migration):
             options={
                 'db_table': 'accounts_organizationmembership',
             },
-        ),
-        migrations.AddField(
-            model_name='location',
-            name='organization',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='locations', to='accounts.organization'),
         ),
         migrations.AddField(
             model_name='user',
