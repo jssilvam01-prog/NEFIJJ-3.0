@@ -1,16 +1,26 @@
+import hmac
+
+from cryptography.fernet import InvalidToken
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.tokens import RefreshToken
 
-from .invitation_tokens import add_business_days, create_invitation_code, hash_invitation_code
+from .invitation_tokens import (
+    add_business_days,
+    create_invitation_code,
+    decrypt_invitation_code,
+    encrypt_invitation_code,
+    hash_invitation_code,
+)
 from .models import (
     Location,
     Organization,
@@ -22,6 +32,7 @@ from .serializers import (
     AdminPasswordResetSerializer,
     ChangePasswordSerializer,
     InvitationCreateSerializer,
+    InvitationRegistrationSerializer,
 
     LoginSerializer,
     LocationSerializer,
@@ -30,6 +41,7 @@ from .serializers import (
     OrganizationAdminCreateSerializer,
     OrganizationInvitationSerializer,
     OrganizationSerializer,
+    OrganizationUserSerializer,
     TechnicianCreateSerializer,
     UserProfileSerializer,
 )
@@ -46,6 +58,40 @@ class ProfileView(generics.RetrieveAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+def technicians_managed_by(user):
+    return User.objects.filter(
+        role=User.Role.TECHNICIAN,
+        location__organization_id__in=active_organization_admin_ids(user),
+        organization_memberships__organization_id=F('location__organization_id'),
+        organization_memberships__location_id=F('location_id'),
+        organization_memberships__role=OrganizationMembership.Role.TECHNICIAN,
+        organization_memberships__organization__status=Organization.Status.ACTIVE,
+    ).distinct()
+
+
+def organization_users_managed_by(user):
+    return User.objects.filter(
+        role=User.Role.STUDENT,
+        location__organization_id__in=active_organization_admin_ids(user),
+        location__is_active=True,
+        organization_memberships__organization_id=F('location__organization_id'),
+        organization_memberships__location_id=F('location_id'),
+        organization_memberships__role=OrganizationMembership.Role.USER,
+        organization_memberships__is_active=True,
+        organization_memberships__organization__status=Organization.Status.ACTIVE,
+    ).distinct()
+
+
+def reset_managed_account_password(request, user):
+    serializer = AdminPasswordResetSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    user.set_password(serializer.validated_data['new_password'])
+    user.save(update_fields=['password'])
+    return Response({
+        'message': 'Contraseña restablecida. Comunica la contraseña temporal de forma segura.',
+    })
 
 
 class ManagedOrganizationsView(APIView):
@@ -219,11 +265,7 @@ class TechnicianListCreateView(APIView):
     def get(self, request):
         if request.user.effective_role != 'organization_admin':
             raise PermissionDenied('Solo un administrador de organización puede gestionar técnicos.')
-        organization_ids = active_organization_admin_ids(request.user)
-        users = User.objects.filter(
-            organization_memberships__organization_id__in=organization_ids,
-            organization_memberships__role=OrganizationMembership.Role.TECHNICIAN,
-        ).distinct().order_by('username')
+        users = technicians_managed_by(request.user).order_by('username')
         return Response(ManagedAccountSerializer(users, many=True).data)
 
     def post(self, request):
@@ -269,6 +311,44 @@ class TechnicianListCreateView(APIView):
         return Response(ManagedAccountSerializer(technician).data)
 
 
+class TechnicianPasswordResetView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, user_id):
+        if request.user.effective_role != 'organization_admin':
+            raise PermissionDenied('Solo un administrador de organización puede cambiar contraseñas.')
+        technician = get_object_or_404(
+            technicians_managed_by(request.user).select_for_update(),
+            pk=user_id,
+        )
+        return reset_managed_account_password(request, technician)
+
+
+class OrganizationUserListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.effective_role != 'organization_admin':
+            raise PermissionDenied('Solo un administrador de organización puede gestionar usuarios.')
+        users = organization_users_managed_by(request.user).select_related('location').order_by('username')
+        return Response(OrganizationUserSerializer(users, many=True).data)
+
+
+class OrganizationUserPasswordResetView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, user_id):
+        if request.user.effective_role != 'organization_admin':
+            raise PermissionDenied('Solo un administrador de organización puede cambiar contraseñas.')
+        user = get_object_or_404(
+            organization_users_managed_by(request.user).select_for_update(),
+            pk=user_id,
+        )
+        return reset_managed_account_password(request, user)
+
+
 class OrganizationInvitationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -297,6 +377,7 @@ class OrganizationInvitationListCreateView(APIView):
             location=location,
             created_by=request.user,
             token_hash=hash_invitation_code(code),
+            code_ciphertext=encrypt_invitation_code(code),
             expires_at=add_business_days(timezone.now(), 7),
         )
         data = OrganizationInvitationSerializer(invitation).data
@@ -345,6 +426,47 @@ class OrganizationInvitationRevokeView(APIView):
             invitation.revoked_at = timezone.now()
             invitation.save(update_fields=['revoked_at'])
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OrganizationInvitationRevealView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.effective_role != 'organization_admin':
+            raise PermissionDenied('Solo un administrador de organización puede consultar invitaciones.')
+        invitation = get_object_or_404(
+            OrganizationInvitation.objects.select_related('organization', 'location').filter(
+                organization_id__in=active_organization_admin_ids(request.user),
+                organization__status=Organization.Status.ACTIVE,
+            ),
+            pk=pk,
+        )
+        if (
+            invitation.revoked_at is not None
+            or invitation.used_at is not None
+            or invitation.expires_at <= timezone.now()
+            or not invitation.location.is_active
+        ):
+            raise ValidationError({'code': 'La invitación ya no está activa y no se puede compartir.'})
+        if not invitation.code_ciphertext:
+            raise ValidationError({
+                'code': 'Esta invitación no se puede recuperar. Genera una nueva invitación.',
+            })
+
+        try:
+            code = decrypt_invitation_code(invitation.code_ciphertext)
+        except (InvalidToken, UnicodeError) as exc:
+            raise ValidationError({
+                'code': 'No se pudo recuperar el código. Revoca esta invitación y genera otra.',
+            }) from exc
+        if not hmac.compare_digest(hash_invitation_code(code), invitation.token_hash):
+            raise ValidationError({
+                'code': 'El código no coincide con la invitación. Revócala y genera otra.',
+            })
+
+        response = Response({'code': code})
+        response['Cache-Control'] = 'private, no-store'
+        return response
 
 
 class AcceptOrganizationInvitationView(APIView):
@@ -403,3 +525,59 @@ class AcceptOrganizationInvitationView(APIView):
             'organization': invitation.organization.name,
             'location': invitation.location.name,
         })
+
+
+class RegisterWithInvitationView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = InvitationRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        invitation = OrganizationInvitation.objects.select_for_update().select_related(
+            'organization',
+            'location',
+        ).filter(
+            token_hash=hash_invitation_code(data['code']),
+        ).first()
+        if (
+            invitation is None
+            or invitation.revoked_at is not None
+            or invitation.used_at is not None
+            or invitation.expires_at <= timezone.now()
+            or invitation.organization.status != Organization.Status.ACTIVE
+            or not invitation.location.is_active
+            or invitation.location.organization_id != invitation.organization_id
+        ):
+            raise ValidationError({'code': 'El código no es válido, venció o ya fue utilizado.'})
+
+        user = User.objects.create_user(
+            username=data['username'],
+            email=data['email'],
+            first_name=data.get('first_name', ''),
+            last_name=data.get('last_name', ''),
+            password=data['password'],
+            role=User.Role.STUDENT,
+            location=invitation.location,
+        )
+        OrganizationMembership.objects.create(
+            organization=invitation.organization,
+            location=invitation.location,
+            user=user,
+            role=OrganizationMembership.Role.USER,
+        )
+        invitation.used_at = timezone.now()
+        invitation.used_by = user
+        invitation.save(update_fields=['used_at', 'used_by'])
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+                'user': UserProfileSerializer(user).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )

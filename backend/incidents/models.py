@@ -7,9 +7,19 @@ from django.db import models
 from accounts.models import Location, Organization, User
 
 
+class LegacyIntegerForeignKey(models.ForeignKey):
+    def db_type(self, connection):
+        return models.IntegerField().db_type(connection)
+
+
 def incident_evidence_path(instance, filename):
     extension = Path(filename).suffix.lower()
     return f'evidences/{uuid4().hex}{extension}'
+
+
+def incident_resolution_path(instance, filename):
+    extension = Path(filename).suffix.lower()
+    return f'evidences/resolutions/{uuid4().hex}{extension}'
 
 
 class Category(models.Model):
@@ -119,6 +129,13 @@ class Incident(models.Model):
         null=True,
         blank=True,
     )
+    resolution_note = models.TextField(blank=True, default='')
+    resolution_image = models.ImageField(
+        max_length=120,
+        upload_to=incident_resolution_path,
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -147,6 +164,7 @@ class Incident(models.Model):
 class IncidentEvent(models.Model):
     class EventType(models.TextChoices):
         CREATED = 'created', 'Creada'
+        ASSIGNED = 'assigned', 'Asignada'
         STATUS_CHANGED = 'status_changed', 'Cambio de estado'
 
     event_type = models.CharField(max_length=30, choices=EventType.choices)
@@ -163,3 +181,34 @@ class IncidentEvent(models.Model):
     class Meta:
         db_table = 'incidents_incidentevent'
         ordering = ['created_at']
+
+
+class IncidentNotification(models.Model):
+    recipient = LegacyIntegerForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='incident_notifications',
+    )
+    incident = LegacyIntegerForeignKey(
+        Incident,
+        on_delete=models.CASCADE,
+        related_name='notifications',
+    )
+    event = LegacyIntegerForeignKey(
+        IncidentEvent,
+        on_delete=models.CASCADE,
+        related_name='notifications',
+    )
+    message = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'incidents_incidentnotification'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['recipient', 'event'],
+                name='unique_incident_event_notification',
+            ),
+        ]

@@ -12,14 +12,20 @@
 
 [x] Fase 7: Implementar API de invitaciones QR (hash, un solo uso, revocación, expiración) y pantallas móviles de escaneo/vinculación y generación.
 
-[x] Fase 8: Crear y suspender organizaciones con API y panel móvil de superadmin; gestión completa de administradores de organización (activar/desactivar, restablecer contraseña y eliminación segura con limpieza referencial).
+[x] Fase 8: Crear y suspender organizaciones con API y panel móvil de superadmin; gestionar administradores de organización (activar/desactivar, restablecer contraseña y eliminación segura con limpieza referencial).
 
-[ ] Pendiente de despliegue local: Revisar/aprobar las migraciones `accounts.0002_organization_invitation` e `incidents.0002_categorytechnician_and_more` antes de aplicarlas a MySQL `nefijj_db`. No ejecutar `migrate` hasta completar la revisión del esquema legado.
+[x] Fase 9: Permitir al administrador de organización restablecer contraseñas provisionales de técnicos y usuarios de sus sedes; la persona puede cambiarla desde Perfil.
 
-[ ] Fase 9: Probar el QR, cámara, permisos de roles, evidencias y conexión LAN en un teléfono físico con Expo Go.
+[x] Fase 10: Asignar o reasignar técnicos activos de la misma sede a incidencias desde el panel de administración; reservar los cambios de estado al técnico asignado.
 
-[ ] Fase 10: Completar protocolos y alertas operativas; ya están implementadas la gestión móvil de sedes, técnicos, categorías y enrutamiento por sede.
+[x] Despliegue local: Revisar y aplicar a `nefijj_db` las migraciones `accounts.0002_organization_invitation`, `incidents.0002_categorytechnician_and_more` e `incidents.0003_incident_resolution_image_incident_resolution_note_and_more`; las referencias nuevas usan `INT` para coincidir con las claves del esquema legado.
+
+[ ] Fase 11: Probar el QR, cámara, permisos de roles, evidencias, asignación de incidencias, restablecimiento de contraseñas y conexión LAN en un teléfono físico con Expo Go.
+
+[ ] Pendiente: Completar protocolos y alertas operativas.
 
 [ ] Pendiente: Definir e implementar un mecanismo verificado de recuperación de contraseña.
 
 [ ] Pendiente: Revisar y aprobar por separado el plan de migración de Django Admin para `nefijj_db`.
+
+[x] Fase 12: Implementar notificaciones dentro de la app para técnico asignado/reportante, historial de atención, nota obligatoria/foto final opcional y SLA de 4/8/24/72 horas corridas. Migración probada en SQLite y aplicada a `nefijj_db` tras revisar el esquema legado.

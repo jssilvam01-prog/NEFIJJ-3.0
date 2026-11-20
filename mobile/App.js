@@ -7,6 +7,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -25,13 +26,17 @@ import {
   getProfile,
   login,
   logout,
+  registerWithInvitation,
 } from './src/services/auth';
 import {
+  assignIncidentTechnician,
   createIncident,
   createCategory,
   getCategories,
   getCategoryRoutes,
+  getIncidentNotifications,
   getIncidents,
+  markIncidentNotificationRead,
   removeCategoryRoute,
   saveCategoryRoute,
   updateCategory,
@@ -47,10 +52,14 @@ import {
   getManagedOrganizations,
   getOrganizationAdmins,
   getOrganizationInvitations,
+  getOrganizationInvitationCode,
   getOrganizationLocations,
+  getOrganizationUsers,
   getOrganizations,
   getTechnicians,
   resetOrganizationAdminPassword,
+  resetOrganizationUserPassword,
+  resetTechnicianPassword,
   revokeOrganizationInvitation,
   setOrganizationAdminStatus,
   setOrganizationStatus,
@@ -74,7 +83,7 @@ const ROLE_LABELS = {
 };
 const STATUS_LABELS = {
   pendiente: 'Pendiente',
-  en_proceso: 'En proceso',
+  en_proceso: 'En reparación',
   resuelto: 'Resuelto',
   cerrado: 'Cerrado',
 };
@@ -83,6 +92,35 @@ const NEXT_STATUS = {
   pendiente: 'en_proceso',
   en_proceso: 'resuelto',
 };
+const SLA_LABELS = {
+  on_track: 'SLA en tiempo',
+  overdue: 'SLA vencido',
+  resolved_on_time: 'Resuelto dentro del SLA',
+  resolved_late: 'Resuelto fuera del SLA',
+};
+const WELCOME_MESSAGES = {
+  user: 'Reporta una incidencia y consulta cómo avanza su atención.',
+  technician: 'Revisa tus asignaciones y mantén informada a tu organización.',
+  organization_admin: 'Coordina sedes, técnicos y el seguimiento de incidencias.',
+  superadmin: 'Supervisa las organizaciones y el estado general de la plataforma.',
+};
+
+function getIncidentEventDescription(event) {
+  if (event.event_type === 'created') return 'Incidencia reportada';
+  if (event.event_type === 'assigned') {
+    const previousTechnician = event.old_value && event.old_value.technician;
+    const technician = event.new_value && event.new_value.technician;
+    if (technician && previousTechnician) {
+      return `Reasignada de ${previousTechnician} a ${technician}`;
+    }
+    return technician ? `Asignada a ${technician}` : 'Se retiró la asignación';
+  }
+  if (event.event_type === 'status_changed') {
+    const status = event.new_value && event.new_value.status;
+    return `Estado: ${STATUS_LABELS[status] || status}`;
+  }
+  return 'Actualización de incidencia';
+}
 
 function getErrorMessage(error) {
   const data = error.response && error.response.data;
@@ -138,11 +176,20 @@ function AppContent() {
   const [screen, setScreen] = useState('login');
   const [user, setUser] = useState(null);
   const [incidents, setIncidents] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [resolutionNotes, setResolutionNotes] = useState({});
+  const [resolutionImages, setResolutionImages] = useState({});
   const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessageText] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [registrationUsername, setRegistrationUsername] = useState('');
+  const [registrationEmail, setRegistrationEmail] = useState('');
+  const [registrationFirstName, setRegistrationFirstName] = useState('');
+  const [registrationLastName, setRegistrationLastName] = useState('');
+  const [registrationPassword, setRegistrationPassword] = useState('');
+  const [registrationPasswordConfirm, setRegistrationPasswordConfirm] = useState('');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [categoryId, setCategoryId] = useState('');
@@ -174,6 +221,14 @@ function AppContent() {
   const [adminNewPassword, setAdminNewPassword] = useState('');
   const [adminNewPasswordConfirm, setAdminNewPasswordConfirm] = useState('');
   const [technicians, setTechnicians] = useState([]);
+  const [incidentTechnicianSelections, setIncidentTechnicianSelections] = useState({});
+  const [organizationUsers, setOrganizationUsers] = useState([]);
+  const [editingTechnicianPasswordId, setEditingTechnicianPasswordId] = useState(null);
+  const [technicianNewPassword, setTechnicianNewPassword] = useState('');
+  const [technicianNewPasswordConfirm, setTechnicianNewPasswordConfirm] = useState('');
+  const [editingUserPasswordId, setEditingUserPasswordId] = useState(null);
+  const [userNewPassword, setUserNewPassword] = useState('');
+  const [userNewPasswordConfirm, setUserNewPasswordConfirm] = useState('');
   const [selectedCategoryOrganizationId, setSelectedCategoryOrganizationId] = useState('');
   const [categoryName, setCategoryName] = useState('');
   const [categoryDescription, setCategoryDescription] = useState('');
@@ -204,22 +259,26 @@ function AppContent() {
       setUser(profile);
       const needsOrganization = profile.role === 'user' && !profile.tenant_active;
       setScreen(needsOrganization ? 'link-organization' : 'incidents');
-      if (!needsOrganization) await loadDashboard();
+      if (!needsOrganization) await loadDashboard(profile);
     } catch (error) {
       setErrorMessageText(`No se pudo restaurar la sesión: ${getErrorMessage(error)}`);
     }
   }
 
-  async function loadDashboard() {
+  async function loadDashboard(currentUser = user) {
     setLoading(true);
     setErrorMessageText('');
     try {
-      const [incidentRows, categoryRows] = await Promise.all([
-        getIncidents(),
-        getCategories(),
-      ]);
+      const requests = [getIncidents(), getCategories(), getIncidentNotifications()];
+      if (currentUser && currentUser.role === 'organization_admin') {
+        requests.push(getTechnicians());
+      }
+      const [incidentRows, categoryRows, notificationRows, technicianRows] = await Promise.all(requests);
       setIncidents(incidentRows);
       setCategories(categoryRows);
+      setNotifications(notificationRows);
+      if (technicianRows) setTechnicians(technicianRows);
+      setIncidentTechnicianSelections({});
     } catch (error) {
       setErrorMessageText(`No se pudieron cargar los datos: ${getErrorMessage(error)}`);
     } finally {
@@ -240,9 +299,51 @@ function AppContent() {
       setPassword('');
       const needsOrganization = profile.role === 'user' && !profile.tenant_active;
       setScreen(needsOrganization ? 'link-organization' : 'incidents');
-      if (!needsOrganization) await loadDashboard();
+      if (!needsOrganization) await loadDashboard(profile);
     } catch (error) {
       setErrorMessageText(`No se pudo iniciar sesión: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function submitRegistration() {
+    if (
+      !inviteCode.trim() ||
+      !registrationUsername.trim() ||
+      !registrationEmail.trim() ||
+      !registrationPassword
+    ) {
+      setErrorMessageText('Completa el código, usuario, correo y contraseña.');
+      return;
+    }
+    if (registrationPassword !== registrationPasswordConfirm) {
+      setErrorMessageText('Las contraseñas no coinciden.');
+      return;
+    }
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      const profile = await registerWithInvitation({
+        code: inviteCode.trim(),
+        username: registrationUsername.trim(),
+        email: registrationEmail.trim(),
+        first_name: registrationFirstName.trim(),
+        last_name: registrationLastName.trim(),
+        password: registrationPassword,
+        password_confirm: registrationPasswordConfirm,
+      });
+      setUser(profile);
+      setUsername(profile.username);
+      setInviteCode('');
+      setRegistrationPassword('');
+      setRegistrationPasswordConfirm('');
+      setScanning(false);
+      setScreen('incidents');
+      await loadDashboard(profile);
+      Alert.alert('Cuenta creada', 'Tu cuenta quedó vinculada a la organización y sede.');
+    } catch (error) {
+      setErrorMessageText(`No se pudo crear la cuenta: ${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -286,6 +387,29 @@ function AppContent() {
     }
   }
 
+  async function pickResolutionImage(incidentId) {
+    setErrorMessageText('');
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        setErrorMessageText('Debes conceder permiso para acceder a la galería.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.75,
+      });
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        setResolutionImages((current) => ({
+          ...current,
+          [incidentId]: result.assets[0],
+        }));
+      }
+    } catch (error) {
+      setErrorMessageText(`No se pudo seleccionar la foto de resolución: ${getErrorMessage(error)}`);
+    }
+  }
+
   async function submitIncident() {
     if (!title.trim() || !description.trim() || !categoryId) {
       setErrorMessageText('Completa título, descripción y categoría.');
@@ -316,14 +440,78 @@ function AppContent() {
     }
   }
 
-  async function changeStatus(incidentId, status) {
+  async function changeStatus(incidentId, status, resolutionNote, resolutionImage) {
     setLoading(true);
     setErrorMessageText('');
     try {
-      await updateIncidentStatus(incidentId, status);
+      await updateIncidentStatus(incidentId, status, resolutionNote, resolutionImage);
+      setResolutionNotes((current) => {
+        const next = { ...current };
+        delete next[incidentId];
+        return next;
+      });
+      setResolutionImages((current) => {
+        const next = { ...current };
+        delete next[incidentId];
+        return next;
+      });
       await loadDashboard();
     } catch (error) {
       setErrorMessageText(`No se pudo actualizar la incidencia: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openNotifications() {
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      setNotifications(await getIncidentNotifications());
+      setScreen('notifications');
+    } catch (error) {
+      setErrorMessageText(`No se pudieron cargar las notificaciones: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openNotifiedIncident(notification) {
+    try {
+      if (!notification.is_read) {
+        const updatedNotification = await markIncidentNotificationRead(notification.id);
+        setNotifications((current) => current.map((item) => (
+          item.id === notification.id ? updatedNotification : item
+        )));
+      }
+      setScreen('incidents');
+      await loadDashboard();
+    } catch (error) {
+      setErrorMessageText(`No se pudo abrir la notificación: ${getErrorMessage(error)}`);
+    }
+  }
+
+  async function assignTechnicianToIncident(incident) {
+    const selectedTechnicianId = incidentTechnicianSelections[incident.id]
+      ?? (incident.assigned_to_id ? String(incident.assigned_to_id) : '');
+    const technicianIsAvailable = technicians.some(
+      (technician) => (
+        String(technician.id) === selectedTechnicianId &&
+        String(technician.location_id) === String(incident.location_id) &&
+        technician.is_active
+      ),
+    );
+    if (!technicianIsAvailable) {
+      setErrorMessageText('Selecciona un técnico activo de la misma sede.');
+      return;
+    }
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      await assignIncidentTechnician(incident.id, Number(selectedTechnicianId));
+      await loadDashboard();
+    } catch (error) {
+      setErrorMessageText(`No se pudo asignar el técnico: ${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -389,6 +577,43 @@ function AppContent() {
       if (newInvitation && newInvitation.id === invitationId) setNewInvitation(null);
     } catch (error) {
       setErrorMessageText(`No se pudo revocar la invitación: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function showInvitation(invitation) {
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      const { code } = invitation.code
+        ? invitation
+        : await getOrganizationInvitationCode(invitation.id);
+      setNewInvitation({ ...invitation, code });
+    } catch (error) {
+      setErrorMessageText(`No se pudo volver a mostrar la invitación: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function shareInvitation(invitation) {
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      const { code } = invitation.code
+        ? invitation
+        : await getOrganizationInvitationCode(invitation.id);
+      await Share.share({
+        title: 'Invitación a NEFIJJ',
+        message: [
+          `Invitación a NEFIJJ · ${invitation.location_name || 'Organización'}`,
+          `Código: ${code}`,
+          `Vence: ${new Date(invitation.expires_at).toLocaleString()}`,
+        ].join('\n'),
+      });
+    } catch (error) {
+      setErrorMessageText(`No se pudo compartir la invitación: ${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -573,6 +798,19 @@ function AppContent() {
     }
   }
 
+  async function openUserManagement() {
+    setScreen('users');
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      setOrganizationUsers(await getOrganizationUsers());
+    } catch (error) {
+      setErrorMessageText(`No se pudieron cargar los usuarios: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function openLocationManagement() {
     setScreen('locations');
     setLoading(true);
@@ -669,6 +907,62 @@ function AppContent() {
       )));
     } catch (error) {
       setErrorMessageText(`No se pudo actualizar al técnico: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleTechnicianPasswordReset(technicianId) {
+    if (!technicianNewPassword || !technicianNewPasswordConfirm) {
+      setErrorMessageText('Escribe y confirma la contraseña temporal.');
+      return;
+    }
+    if (technicianNewPassword !== technicianNewPasswordConfirm) {
+      setErrorMessageText('Las contraseñas no coinciden.');
+      return;
+    }
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      await resetTechnicianPassword(
+        technicianId,
+        technicianNewPassword,
+        technicianNewPasswordConfirm,
+      );
+      Alert.alert('Contraseña restablecida', 'Entrega la contraseña temporal al técnico de forma segura.');
+      setEditingTechnicianPasswordId(null);
+      setTechnicianNewPassword('');
+      setTechnicianNewPasswordConfirm('');
+    } catch (error) {
+      setErrorMessageText(`No se pudo cambiar la contraseña: ${getErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleUserPasswordReset(userId) {
+    if (!userNewPassword || !userNewPasswordConfirm) {
+      setErrorMessageText('Escribe y confirma la contraseña temporal.');
+      return;
+    }
+    if (userNewPassword !== userNewPasswordConfirm) {
+      setErrorMessageText('Las contraseñas no coinciden.');
+      return;
+    }
+    setLoading(true);
+    setErrorMessageText('');
+    try {
+      await resetOrganizationUserPassword(
+        userId,
+        userNewPassword,
+        userNewPasswordConfirm,
+      );
+      Alert.alert('Contraseña restablecida', 'Entrega la contraseña temporal al usuario de forma segura.');
+      setEditingUserPasswordId(null);
+      setUserNewPassword('');
+      setUserNewPasswordConfirm('');
+    } catch (error) {
+      setErrorMessageText(`No se pudo cambiar la contraseña: ${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -845,7 +1139,7 @@ function AppContent() {
       setUser(profile);
       setInviteCode('');
       setScreen('incidents');
-      await loadDashboard();
+      await loadDashboard(profile);
     } catch (error) {
       setErrorMessageText(`No se pudo vincular la cuenta: ${getErrorMessage(error)}`);
     } finally {
@@ -882,7 +1176,12 @@ function AppContent() {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView
+      style={[
+        styles.safeArea,
+        (screen === 'login' || screen === 'register') && styles.loginSafeArea,
+      ]}
+    >
       <StatusBar style="dark" />
       <KeyboardAvoidingView
         style={styles.fill}
@@ -890,38 +1189,206 @@ function AppContent() {
       >
         {screen === 'login' ? (
           <ScrollView contentContainerStyle={styles.loginContainer} keyboardShouldPersistTaps="handled">
-            <Text style={styles.brand}>NEFIJJ</Text>
-            <Text style={styles.subtitle}>Gestión de incidencias</Text>
-            <TextInput
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={setUsername}
-              placeholder="Usuario"
-              style={styles.input}
-              value={username}
-            />
-            <TextInput
-              onChangeText={setPassword}
-              placeholder="Contraseña"
-              secureTextEntry
-              style={styles.input}
-              value={password}
-            />
-            <PrimaryButton title="Iniciar sesión" onPress={handleLogin} disabled={loading} />
+            <View style={styles.loginHero}>
+              <View style={styles.loginHeroGlow} />
+              <View style={styles.loginBrandRow}>
+                <View style={styles.brandMark} accessibilityLabel="Logo de NEFIJJ">
+                  <Text style={styles.brandMarkText}>🐼</Text>
+                </View>
+                <View style={styles.loginBrandCopy}>
+                  <Text style={styles.loginEyebrow}>GESTIÓN DE INCIDENCIAS</Text>
+                  <Text style={styles.brand}>NEFIJJ</Text>
+                </View>
+                <View style={styles.loginMascotBadge}>
+                  <Text style={styles.loginMascot}>✦</Text>
+                </View>
+              </View>
+              <Text style={styles.loginHeroTitle}>¡Bienvenido a NEFIJJ!</Text>
+              <Text style={styles.loginHeroText}>
+                Cuidamos tus espacios con reportes claros y seguimiento para cada incidencia.
+              </Text>
+              <View style={styles.loginFeatureRow}>
+                {['Reporta', 'Da seguimiento', 'Resuelve'].map((feature) => (
+                  <View key={feature} style={styles.loginFeaturePill}>
+                    <Text style={styles.loginFeatureText}>{feature}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+            <View style={styles.loginCard}>
+              <Text style={styles.loginCardTitle}>Iniciar sesión</Text>
+              <Text style={styles.loginCardSubtitle}>Ingresa con tu cuenta de organización.</Text>
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={setUsername}
+                placeholder="Usuario"
+                style={styles.input}
+                value={username}
+              />
+              <TextInput
+                onChangeText={setPassword}
+                placeholder="Contraseña"
+                secureTextEntry
+                style={styles.input}
+                value={password}
+              />
+              <PrimaryButton title="Iniciar sesión" onPress={handleLogin} disabled={loading} />
+            </View>
+            <Pressable
+              onPress={() => {
+                setErrorMessageText('');
+                setInviteCode('');
+                setScanning(false);
+                setScreen('register');
+              }}
+              style={styles.adminInviteLink}
+            >
+              <Text style={styles.adminInviteText}>Crear cuenta con QR o código</Text>
+            </Pressable>
             <Text style={styles.helperText}>
-              Las cuentas las habilita el administrador de la organización.
+              Pide una invitación al administrador de tu organización.
             </Text>
             {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-            {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+            {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
+          </ScrollView>
+        ) : screen === 'register' ? (
+          <ScrollView contentContainerStyle={styles.loginContainer} keyboardShouldPersistTaps="handled">
+            <View style={styles.loginBrandRow}>
+              <View style={styles.brandMark}>
+                <Text style={styles.brandMarkText}>🐼</Text>
+              </View>
+              <View style={styles.loginBrandCopy}>
+                <Text style={styles.loginEyebrow}>ÚNETE A TU ORGANIZACIÓN</Text>
+                <Text style={styles.brand}>NEFIJJ</Text>
+              </View>
+            </View>
+            <View style={styles.loginCard}>
+              <Text style={styles.loginCardTitle}>Crear cuenta</Text>
+              <Text style={styles.loginCardSubtitle}>
+                Escanea o escribe el código de invitación que te entregó el administrador.
+              </Text>
+              <View style={styles.loginQrPanel}>
+                <View style={styles.loginQrHeading}>
+                  <View style={styles.loginQrIcon}>
+                    <Text style={styles.loginQrIconText}>▦</Text>
+                  </View>
+                  <View style={styles.loginQrCopy}>
+                    <Text style={styles.loginQrTitle}>Invitación de tu organización</Text>
+                    <Text style={styles.loginQrDescription}>El código solo se puede usar una vez.</Text>
+                  </View>
+                </View>
+                <View style={styles.loginQrInputRow}>
+                  <TextInput
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    onChangeText={setInviteCode}
+                    placeholder="Código de invitación"
+                    style={[styles.input, styles.loginQrInput]}
+                    value={inviteCode}
+                  />
+                  <Pressable
+                    onPress={openInvitationScanner}
+                    style={styles.loginQrScanButton}
+                    disabled={loading}
+                  >
+                    <Text style={styles.loginQrScanIcon}>⌗</Text>
+                    <Text style={styles.loginQrScanText}>Escanear</Text>
+                  </Pressable>
+                </View>
+                {scanning ? (
+                  <View style={styles.loginScannerFrame}>
+                    <CameraView
+                      barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+                      onBarcodeScanned={onInvitationScanned}
+                      style={styles.loginCamera}
+                    />
+                    <Pressable
+                      onPress={() => setScanning(false)}
+                      style={styles.cancelScanButton}
+                    >
+                      <Text style={styles.cancelScanText}>Cancelar escaneo</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </View>
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={setRegistrationUsername}
+                placeholder="Nombre de usuario"
+                style={styles.input}
+                value={registrationUsername}
+              />
+              <TextInput
+                autoCapitalize="words"
+                onChangeText={setRegistrationFirstName}
+                placeholder="Nombre (opcional)"
+                style={styles.input}
+                value={registrationFirstName}
+              />
+              <TextInput
+                autoCapitalize="words"
+                onChangeText={setRegistrationLastName}
+                placeholder="Apellido (opcional)"
+                style={styles.input}
+                value={registrationLastName}
+              />
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="email-address"
+                onChangeText={setRegistrationEmail}
+                placeholder="Correo electrónico"
+                style={styles.input}
+                value={registrationEmail}
+              />
+              <TextInput
+                onChangeText={setRegistrationPassword}
+                placeholder="Contraseña"
+                secureTextEntry
+                style={styles.input}
+                value={registrationPassword}
+              />
+              <TextInput
+                onChangeText={setRegistrationPasswordConfirm}
+                placeholder="Confirmar contraseña"
+                secureTextEntry
+                style={styles.input}
+                value={registrationPasswordConfirm}
+              />
+              {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+              <PrimaryButton
+                title="Crear cuenta"
+                onPress={submitRegistration}
+                disabled={loading}
+              />
+              <Pressable
+                onPress={() => {
+                  setScanning(false);
+                  setScreen('login');
+                }}
+                style={styles.loginBackButton}
+              >
+                <Text style={styles.loginBackIcon}>‹</Text>
+                <Text style={styles.loginBackText}>Ya tengo cuenta · Volver al inicio</Text>
+              </Pressable>
+              {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
+            </View>
           </ScrollView>
         ) : (
           <>
             <View style={styles.header}>
-              <View>
-                <Text style={styles.headerTitle}>NEFIJJ</Text>
-                <Text style={styles.headerSubtitle}>
-                  {user && `${user.username} · ${ROLE_LABELS[user.role] || user.role}`}
-                </Text>
+              <View style={styles.headerIdentity}>
+                <View style={styles.headerMark}>
+                  <Text style={styles.headerMarkText}>🐼</Text>
+                </View>
+                <View>
+                  <Text style={styles.headerTitle}>NEFIJJ</Text>
+                  <Text style={styles.headerSubtitle}>
+                    {user && `${user.username} · ${ROLE_LABELS[user.role] || user.role}`}
+                  </Text>
+                </View>
               </View>
               <View style={styles.headerActions}>
                 {user && user.role === 'organization_admin' ? (
@@ -931,6 +1398,9 @@ function AppContent() {
                     </Pressable>
                     <Pressable onPress={openTechnicianManagement} style={styles.headerButton}>
                       <Text style={styles.headerButtonText}>Técnicos</Text>
+                    </Pressable>
+                    <Pressable onPress={openUserManagement} style={styles.headerButton}>
+                      <Text style={styles.headerButtonText}>Usuarios</Text>
                     </Pressable>
                     <Pressable onPress={openCategoryManagement} style={styles.headerButton}>
                       <Text style={styles.headerButtonText}>Categorías</Text>
@@ -945,6 +1415,11 @@ function AppContent() {
                     <Text style={styles.headerButtonText}>Organizaciones</Text>
                   </Pressable>
                 ) : null}
+                <Pressable onPress={openNotifications} style={styles.headerButton}>
+                  <Text style={styles.headerButtonText}>
+                    Avisos{notifications.some((notification) => !notification.is_read) ? ' •' : ''}
+                  </Text>
+                </Pressable>
                 <Pressable onPress={() => setScreen('profile')} style={styles.headerButton}>
                   <Text style={styles.headerButtonText}>Perfil</Text>
                 </Pressable>
@@ -956,6 +1431,15 @@ function AppContent() {
 
             {screen === 'incidents' ? (
               <ScrollView contentContainerStyle={styles.content}>
+                <View style={styles.dashboardHero}>
+                  <Text style={styles.heroEyebrow}>NEFIJJ · TU ORGANIZACIÓN</Text>
+                  <Text style={styles.dashboardHeroTitle}>
+                    ¡Hola{user && user.username ? `, ${user.username}` : ''}!
+                  </Text>
+                  <Text style={styles.dashboardHeroText}>
+                    {WELCOME_MESSAGES[user && user.role] || 'Estamos aquí para ayudarte a dar seguimiento a tus incidencias.'}
+                  </Text>
+                </View>
                 <View style={styles.sectionHeading}>
                   <Text style={styles.title}>Incidencias</Text>
                   <Pressable onPress={loadDashboard} accessibilityRole="button">
@@ -971,7 +1455,7 @@ function AppContent() {
                   </>
                 ) : null}
                 {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
                 {!loading && incidents.length === 0 ? (
                   <Text style={styles.emptyText}>Todavía no hay incidencias para mostrar.</Text>
                 ) : null}
@@ -989,16 +1473,120 @@ function AppContent() {
                       Reportó {incident.reporter}
                       {incident.assigned_to ? ` · Asignada a ${incident.assigned_to}` : ''}
                     </Text>
+                    <Text style={styles.cardMeta}>
+                      {SLA_LABELS[incident.sla_status] || incident.sla_status}
+                      {incident.sla_due_at
+                        ? ` · Vence ${new Date(incident.sla_due_at).toLocaleString()}`
+                        : ''}
+                    </Text>
                     {incident.evidence_image ? (
                       <EvidenceThumbnail uri={incident.evidence_image} />
                     ) : null}
-                    {user && (
-                      (user.role === 'technician' && incident.assigned_to === user.username) ||
-                      user.role === 'organization_admin'
-                    ) && NEXT_STATUS[incident.status] ? (
+                    {incident.resolution_note ? (
+                      <Text style={styles.bodyText}>Resolución: {incident.resolution_note}</Text>
+                    ) : null}
+                    {incident.resolution_image ? (
+                      <EvidenceThumbnail uri={incident.resolution_image} />
+                    ) : null}
+                    {incident.events && incident.events.length > 0 ? (
+                      <View style={styles.history}>
+                        <Text style={styles.label}>Historial</Text>
+                        {incident.events.map((event) => (
+                          <Text key={event.id} style={styles.cardMeta}>
+                            {getIncidentEventDescription(event)} · {event.actor} ·{' '}
+                            {new Date(event.created_at).toLocaleString()}
+                          </Text>
+                        ))}
+                      </View>
+                    ) : null}
+                    {user && user.role === 'organization_admin' ? (
+                      <View style={styles.formGroup}>
+                        <Text style={styles.label}>Asignar técnico de esta sede</Text>
+                        <View style={styles.choiceList}>
+                          {technicians
+                            .filter((technician) => (
+                              technician.is_active &&
+                              String(technician.location_id) === String(incident.location_id)
+                            ))
+                            .map((technician) => {
+                              const selectedTechnicianId = incidentTechnicianSelections[incident.id]
+                                ?? (incident.assigned_to_id ? String(incident.assigned_to_id) : '');
+                              return (
+                                <Pressable
+                                  key={technician.id}
+                                  onPress={() => setIncidentTechnicianSelections((current) => ({
+                                    ...current,
+                                    [incident.id]: String(technician.id),
+                                  }))}
+                                  style={[
+                                    styles.choice,
+                                    selectedTechnicianId === String(technician.id) &&
+                                      styles.selectedChoice,
+                                  ]}
+                                >
+                                  <Text style={styles.choiceText}>{technician.username}</Text>
+                                </Pressable>
+                              );
+                            })}
+                        </View>
+                        {incident.assigned_to ? (
+                          <Text style={styles.cardMeta}>Asignado a {incident.assigned_to}</Text>
+                        ) : null}
+                        <PrimaryButton
+                          title={incident.assigned_to ? 'Guardar asignación' : 'Asignar técnico'}
+                          onPress={() => assignTechnicianToIncident(incident)}
+                          disabled={loading}
+                        />
+                      </View>
+                    ) : null}
+                    {user && user.role === 'technician' && incident.assigned_to === user.username &&
+                    NEXT_STATUS[incident.status] ? (
                       <View style={styles.statusActions}>
+                        {NEXT_STATUS[incident.status] === 'resuelto' ? (
+                          <View style={styles.formGroup}>
+                            <Text style={styles.label}>Nota de resolución (obligatoria)</Text>
+                            <TextInput
+                              multiline
+                              onChangeText={(value) => setResolutionNotes((current) => ({
+                                ...current,
+                                [incident.id]: value,
+                              }))}
+                              placeholder="Describe qué reparación realizaste"
+                              style={[styles.input, styles.multilineInput]}
+                              textAlignVertical="top"
+                              value={resolutionNotes[incident.id] || ''}
+                            />
+                            <Pressable
+                              onPress={() => pickResolutionImage(incident.id)}
+                              style={styles.outlineButton}
+                            >
+                              <Text style={styles.outlineButtonText}>
+                                {resolutionImages[incident.id] ? 'Cambiar foto final' : 'Agregar foto final (opcional)'}
+                              </Text>
+                            </Pressable>
+                            {resolutionImages[incident.id] ? (
+                              <Image
+                                source={{ uri: resolutionImages[incident.id].uri }}
+                                style={styles.evidenceImage}
+                              />
+                            ) : null}
+                          </View>
+                        ) : null}
                         <Pressable
-                          onPress={() => changeStatus(incident.id, NEXT_STATUS[incident.status])}
+                          onPress={() => {
+                            const nextStatus = NEXT_STATUS[incident.status];
+                            const note = (resolutionNotes[incident.id] || '').trim();
+                            if (nextStatus === 'resuelto' && !note) {
+                              setErrorMessageText('Escribe la nota de resolución antes de cerrar.');
+                              return;
+                            }
+                            changeStatus(
+                              incident.id,
+                              nextStatus,
+                              note,
+                              resolutionImages[incident.id],
+                            );
+                          }}
                           style={styles.outlineButton}
                         >
                           <Text style={styles.outlineButtonText}>
@@ -1008,6 +1596,36 @@ function AppContent() {
                       </View>
                     ) : null}
                   </View>
+                ))}
+              </ScrollView>
+            ) : null}
+
+            {screen === 'notifications' ? (
+              <ScrollView contentContainerStyle={styles.content}>
+                <View style={styles.sectionHeading}>
+                  <Text style={styles.title}>Notificaciones</Text>
+                  <Pressable onPress={() => setScreen('incidents')} accessibilityRole="button">
+                    <Text style={styles.linkText}>Volver</Text>
+                  </Pressable>
+                </View>
+                {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
+                {!loading && notifications.length === 0 ? (
+                  <Text style={styles.emptyText}>Todavía no tienes notificaciones.</Text>
+                ) : null}
+                {notifications.map((notification) => (
+                  <Pressable
+                    key={notification.id}
+                    onPress={() => openNotifiedIncident(notification)}
+                    style={[styles.card, !notification.is_read && styles.unreadNotification]}
+                  >
+                    <Text style={styles.cardTitle}>{notification.incident_title}</Text>
+                    <Text style={styles.bodyText}>{notification.message}</Text>
+                    <Text style={styles.cardMeta}>
+                      {new Date(notification.created_at).toLocaleString()}
+                      {notification.is_read ? ' · Leída' : ' · Sin leer'}
+                    </Text>
+                  </Pressable>
                 ))}
               </ScrollView>
             ) : null}
@@ -1086,7 +1704,7 @@ function AppContent() {
                 <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
                   <Text style={styles.linkText}>Cancelar</Text>
                 </Pressable>
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
               </ScrollView>
             ) : null}
 
@@ -1135,7 +1753,7 @@ function AppContent() {
               <ScrollView contentContainerStyle={styles.content}>
                 <Text style={styles.title}>Invitaciones QR</Text>
                 <Text style={styles.bodyText}>
-                  Cada código se guarda como hash, vence en siete días hábiles y solo se muestra al crearlo.
+                  El código se protege con cifrado, vence en siete días hábiles y puedes volver a mostrarlo o compartirlo mientras siga activo. La persona puede crear una cuenta desde el inicio o vincular una cuenta existente.
                 </Text>
                 <Text style={styles.label}>Sede</Text>
                 <View style={styles.choiceList}>
@@ -1170,6 +1788,11 @@ function AppContent() {
                     <Text style={styles.cardMeta}>
                       Vence: {new Date(newInvitation.expires_at).toLocaleString()}
                     </Text>
+                    <PrimaryButton
+                      title="Compartir invitación"
+                      onPress={() => shareInvitation(newInvitation)}
+                      disabled={loading}
+                    />
                   </View>
                 ) : null}
                 <Text style={styles.label}>Códigos emitidos</Text>
@@ -1183,6 +1806,29 @@ function AppContent() {
                         {invitation.used_at ? 'Utilizada' : invitation.revoked_at ? 'Revocada' : expired ? 'Vencida' : 'Activa'}
                         {' · Vence '}{new Date(invitation.expires_at).toLocaleString()}
                       </Text>
+                      {!inactive && invitation.can_reveal_code ? (
+                        <View style={styles.invitationActions}>
+                          <Pressable
+                            onPress={() => showInvitation(invitation)}
+                            style={styles.outlineButton}
+                            disabled={loading}
+                          >
+                            <Text style={styles.outlineButtonText}>Ver QR y código</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => shareInvitation(invitation)}
+                            style={styles.outlineButton}
+                            disabled={loading}
+                          >
+                            <Text style={styles.outlineButtonText}>Compartir código</Text>
+                          </Pressable>
+                        </View>
+                      ) : null}
+                      {!inactive && !invitation.can_reveal_code ? (
+                        <Text style={styles.emptyText}>
+                          No se puede recuperar el código de esta invitación. Genera una nueva para compartirla.
+                        </Text>
+                      ) : null}
                       {!inactive ? (
                         <Pressable
                           onPress={() => revokeInvitation(invitation.id)}
@@ -1195,7 +1841,7 @@ function AppContent() {
                   );
                 })}
                 {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
                 <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
                   <Text style={styles.linkText}>Volver a incidencias</Text>
                 </Pressable>
@@ -1361,7 +2007,7 @@ function AppContent() {
                   </View>
                 ))}
                 {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
                 <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
                   <Text style={styles.linkText}>Volver a supervisión</Text>
                 </Pressable>
@@ -1446,10 +2092,116 @@ function AppContent() {
                         {technician.is_active ? 'Desactivar acceso' : 'Reactivar acceso'}
                       </Text>
                     </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        setEditingTechnicianPasswordId(
+                          editingTechnicianPasswordId === technician.id ? null : technician.id,
+                        );
+                        setTechnicianNewPassword('');
+                        setTechnicianNewPasswordConfirm('');
+                        setErrorMessageText('');
+                      }}
+                      style={styles.outlineButton}
+                    >
+                      <Text style={styles.outlineButtonText}>
+                        {editingTechnicianPasswordId === technician.id
+                          ? 'Cancelar cambio'
+                          : 'Cambiar contraseña'}
+                      </Text>
+                    </Pressable>
+                    {editingTechnicianPasswordId === technician.id ? (
+                      <View style={styles.formGroup}>
+                        <TextInput
+                          onChangeText={setTechnicianNewPassword}
+                          placeholder="Contraseña temporal nueva"
+                          secureTextEntry
+                          style={styles.input}
+                          value={technicianNewPassword}
+                        />
+                        <TextInput
+                          onChangeText={setTechnicianNewPasswordConfirm}
+                          placeholder="Confirmar contraseña temporal"
+                          secureTextEntry
+                          style={styles.input}
+                          value={technicianNewPasswordConfirm}
+                        />
+                        <PrimaryButton
+                          title="Guardar contraseña"
+                          onPress={() => handleTechnicianPasswordReset(technician.id)}
+                          disabled={loading}
+                        />
+                      </View>
+                    ) : null}
                   </View>
                 ))}
                 {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
+                <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
+                  <Text style={styles.linkText}>Volver a incidencias</Text>
+                </Pressable>
+              </ScrollView>
+            ) : null}
+
+            {screen === 'users' ? (
+              <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+                <Text style={styles.title}>Usuarios de la organización</Text>
+                <Text style={styles.bodyText}>
+                  Define una contraseña temporal y entrégala al usuario de forma segura. Luego deberá cambiarla desde Perfil.
+                </Text>
+                {organizationUsers.map((organizationUser) => (
+                  <View key={organizationUser.id} style={styles.card}>
+                    <Text style={styles.cardTitle}>{organizationUser.username}</Text>
+                    <Text style={styles.cardMeta}>
+                      {organizationUser.email} · {organizationUser.location || 'Sin sede'} ·
+                      {' '}{organizationUser.is_active ? 'Activo' : 'Inactivo'}
+                    </Text>
+                    <Pressable
+                      onPress={() => {
+                        setEditingUserPasswordId(
+                          editingUserPasswordId === organizationUser.id ? null : organizationUser.id,
+                        );
+                        setUserNewPassword('');
+                        setUserNewPasswordConfirm('');
+                        setErrorMessageText('');
+                      }}
+                      style={styles.outlineButton}
+                    >
+                      <Text style={styles.outlineButtonText}>
+                        {editingUserPasswordId === organizationUser.id
+                          ? 'Cancelar cambio'
+                          : 'Cambiar contraseña'}
+                      </Text>
+                    </Pressable>
+                    {editingUserPasswordId === organizationUser.id ? (
+                      <View style={styles.formGroup}>
+                        <TextInput
+                          onChangeText={setUserNewPassword}
+                          placeholder="Contraseña temporal nueva"
+                          secureTextEntry
+                          style={styles.input}
+                          value={userNewPassword}
+                        />
+                        <TextInput
+                          onChangeText={setUserNewPasswordConfirm}
+                          placeholder="Confirmar contraseña temporal"
+                          secureTextEntry
+                          style={styles.input}
+                          value={userNewPasswordConfirm}
+                        />
+                        <PrimaryButton
+                          title="Guardar contraseña"
+                          onPress={() => handleUserPasswordReset(organizationUser.id)}
+                          disabled={loading}
+                        />
+                      </View>
+                    ) : null}
+                  </View>
+                ))}
+                {organizationUsers.length === 0 && !loading ? (
+                  <Text style={styles.emptyText}>No hay usuarios activos en tus sedes.</Text>
+                ) : null}
+                {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
                 <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
                   <Text style={styles.linkText}>Volver a incidencias</Text>
                 </Pressable>
@@ -1634,7 +2386,7 @@ function AppContent() {
                   </>
                 ) : null}
                 {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
                 <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
                   <Text style={styles.linkText}>Volver a incidencias</Text>
                 </Pressable>
@@ -1701,7 +2453,7 @@ function AppContent() {
                   </View>
                 ))}
                 {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
                 <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
                   <Text style={styles.linkText}>Volver a incidencias</Text>
                 </Pressable>
@@ -1746,7 +2498,7 @@ function AppContent() {
                 <Pressable onPress={() => setScreen('incidents')} style={styles.cancelLink}>
                   <Text style={styles.linkText}>Volver a incidencias</Text>
                 </Pressable>
-                {loading ? <ActivityIndicator color="#155eef" style={styles.loader} /> : null}
+                {loading ? <ActivityIndicator color="#167D68" style={styles.loader} /> : null}
               </ScrollView>
             ) : null}
           </>
@@ -1767,7 +2519,10 @@ export default function App() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#f5f7fb',
+    backgroundColor: '#F7F5EF',
+  },
+  loginSafeArea: {
+    backgroundColor: '#FFF8E9',
   },
   fill: {
     flex: 1,
@@ -1776,21 +2531,288 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     padding: 28,
-    backgroundColor: '#f5f7fb',
+    backgroundColor: '#F7F5EF',
   },
   loginContainer: {
+    backgroundColor: '#FFF8E9',
     flexGrow: 1,
     justifyContent: 'center',
-    padding: 24,
+    gap: 17,
+    padding: 20,
+    paddingBottom: 30,
   },
-  brand: {
-    color: '#155eef',
-    fontSize: 36,
+  loginHero: {
+    backgroundColor: '#F4C85E',
+    borderColor: '#E4B64D',
+    borderRadius: 28,
+    borderWidth: 1,
+    gap: 12,
+    overflow: 'hidden',
+    padding: 20,
+    shadowColor: '#775117',
+    shadowOffset: { width: 0, height: 7 },
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    elevation: 3,
+  },
+  loginHeroGlow: {
+    backgroundColor: '#F9DE94',
+    borderRadius: 100,
+    height: 200,
+    opacity: 0.65,
+    position: 'absolute',
+    right: -80,
+    top: -105,
+    width: 200,
+  },
+  loginBrandRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+  },
+  loginBrandCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  loginEyebrow: {
+    color: '#526047',
+    fontSize: 10,
     fontWeight: '800',
+    letterSpacing: 1.1,
+  },
+  loginMascotBadge: {
+    alignItems: 'center',
+    backgroundColor: '#FFF7E4',
+    borderColor: '#E8CB7C',
+    borderRadius: 23,
+    borderWidth: 1,
+    height: 54,
+    justifyContent: 'center',
+    width: 54,
+  },
+  loginMascot: {
+    color: '#315641',
+    fontSize: 30,
+  },
+  loginHeroTitle: {
+    color: '#253E31',
+    fontSize: 22,
+    fontWeight: '800',
+    lineHeight: 28,
+    marginTop: 10,
+  },
+  loginHeroText: {
+    color: '#455542',
+    fontSize: 14,
+    lineHeight: 20,
+    maxWidth: 340,
+  },
+  loginFeatureRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+    marginTop: 3,
+  },
+  loginFeaturePill: {
+    backgroundColor: '#FBE8B5',
+    borderColor: '#E8CA7D',
+    borderRadius: 16,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  loginFeatureText: {
+    color: '#38503A',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  brandMark: {
+    alignItems: 'center',
+    backgroundColor: '#164D44',
+    borderColor: '#FFFFFF',
+    borderRadius: 20,
+    borderWidth: 2,
+    height: 58,
+    justifyContent: 'center',
+    shadowColor: '#243B2A',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 5,
+    width: 58,
+  },
+  brandMarkText: {
+    color: '#FFFFFF',
+    fontSize: 27,
+    fontWeight: '800',
+  },
+  invitationActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  loginCard: {
+    backgroundColor: '#FFFEFA',
+    borderColor: '#EADCB7',
+    borderRadius: 25,
+    borderWidth: 1,
+    gap: 12,
+    padding: 18,
+    shadowColor: '#60461C',
+    shadowOffset: { width: 0, height: 7 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 2,
+  },
+  loginCardTitle: {
+    color: '#21392E',
+    fontSize: 21,
+    fontWeight: '800',
+  },
+  loginCardSubtitle: {
+    color: '#687165',
+    fontSize: 14,
+    marginBottom: 4,
+  },
+  adminInviteLink: {
+    alignItems: 'center',
+    backgroundColor: '#FFFEFA',
+    borderColor: '#EADCB7',
+    borderRadius: 16,
+    borderWidth: 1,
+    paddingHorizontal: 15,
+    paddingVertical: 13,
+  },
+  adminInviteText: {
+    color: '#315B48',
+    fontSize: 14,
+    fontWeight: '700',
     textAlign: 'center',
   },
+  loginBackButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#F8F0D9',
+    borderColor: '#E6D39E',
+    borderRadius: 14,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 7,
+    minHeight: 40,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  loginBackIcon: {
+    color: '#315B48',
+    fontSize: 24,
+    fontWeight: '700',
+    lineHeight: 25,
+  },
+  loginBackText: {
+    color: '#315B48',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  loginQrPanel: {
+    backgroundColor: '#FBF6E8',
+    borderColor: '#E8D69F',
+    borderRadius: 17,
+    borderWidth: 1,
+    gap: 10,
+    padding: 12,
+  },
+  loginQrHeading: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 9,
+  },
+  loginQrIcon: {
+    alignItems: 'center',
+    backgroundColor: '#F2D98D',
+    borderRadius: 12,
+    height: 38,
+    justifyContent: 'center',
+    width: 38,
+  },
+  loginQrIconText: {
+    color: '#315641',
+    fontSize: 25,
+    fontWeight: '800',
+    lineHeight: 30,
+  },
+  loginQrCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  loginQrTitle: {
+    color: '#30463A',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  loginQrDescription: {
+    color: '#6E6B5E',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  loginQrInputRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+  loginQrInput: {
+    flex: 1,
+    fontSize: 14,
+    minWidth: 0,
+    minHeight: 48,
+    paddingHorizontal: 12,
+  },
+  loginQrScanButton: {
+    alignItems: 'center',
+    backgroundColor: '#164D44',
+    borderRadius: 13,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingHorizontal: 10,
+    width: 90,
+  },
+  loginQrScanIcon: {
+    color: '#F7DE9A',
+    fontSize: 17,
+    fontWeight: '800',
+    lineHeight: 20,
+  },
+  loginQrScanText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  loginScannerFrame: {
+    gap: 7,
+  },
+  loginCamera: {
+    borderRadius: 14,
+    height: 220,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  cancelScanButton: {
+    alignSelf: 'flex-end',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  cancelScanText: {
+    color: '#315B48',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  brand: {
+    color: '#164D44',
+    fontSize: 29,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+  },
   subtitle: {
-    color: '#475467',
+    color: '#455542',
     fontSize: 17,
     marginBottom: 32,
     marginTop: 8,
@@ -1798,22 +2820,42 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderBottomColor: '#e4e7ec',
+    backgroundColor: '#FFFEFA',
+    borderBottomColor: '#EADCB7',
     borderBottomWidth: 1,
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingHorizontal: 18,
-    paddingVertical: 14,
+    minHeight: 72,
+    paddingHorizontal: 16,
+    paddingVertical: 11,
   },
-  headerTitle: {
-    color: '#155eef',
+  headerIdentity: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexShrink: 1,
+    gap: 10,
+  },
+  headerMark: {
+    alignItems: 'center',
+    backgroundColor: '#FBE8B5',
+    borderRadius: 13,
+    height: 42,
+    justifyContent: 'center',
+    width: 42,
+  },
+  headerMarkText: {
+    color: '#164D44',
     fontSize: 21,
     fontWeight: '800',
   },
+  headerTitle: {
+    color: '#164D44',
+    fontSize: 19,
+    fontWeight: '800',
+  },
   headerSubtitle: {
-    color: '#475467',
-    fontSize: 12,
+    color: '#66766F',
+    fontSize: 11,
     marginTop: 3,
   },
   headerActions: {
@@ -1824,16 +2866,48 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   headerButton: {
-    paddingHorizontal: 9,
-    paddingVertical: 8,
+    alignItems: 'center',
+    backgroundColor: '#F8F0D9',
+    borderRadius: 11,
+    justifyContent: 'center',
+    minHeight: 38,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
   },
   headerButtonText: {
-    color: '#155eef',
+    color: '#205D4F',
+    fontSize: 13,
     fontWeight: '600',
   },
   content: {
-    gap: 12,
+    backgroundColor: '#F7F5EF',
+    gap: 15,
     padding: 18,
+    paddingBottom: 24,
+  },
+  dashboardHero: {
+    backgroundColor: '#164D44',
+    borderRadius: 22,
+    gap: 10,
+    marginBottom: 3,
+    overflow: 'hidden',
+    padding: 21,
+  },
+  heroEyebrow: {
+    color: '#9BE3C6',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.1,
+  },
+  dashboardHeroTitle: {
+    color: '#FFFFFF',
+    fontSize: 25,
+    fontWeight: '800',
+  },
+  dashboardHeroText: {
+    color: '#D5E8DF',
+    fontSize: 14,
+    lineHeight: 20,
   },
   sectionHeading: {
     alignItems: 'center',
@@ -1841,58 +2915,67 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   title: {
-    color: '#101828',
+    color: '#1C3029',
     fontSize: 24,
     fontWeight: '700',
   },
   card: {
-    backgroundColor: '#fff',
-    borderColor: '#e4e7ec',
-    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E1EAE5',
+    borderRadius: 17,
     borderWidth: 1,
     gap: 9,
     padding: 14,
+  },
+  history: {
+    backgroundColor: '#F3F8F5',
+    borderRadius: 12,
+    gap: 6,
+    padding: 10,
+  },
+  unreadNotification: {
+    borderColor: '#167D68',
   },
   formGroup: {
     gap: 10,
   },
   cardTitle: {
-    color: '#101828',
+    color: '#24372F',
     flex: 1,
     fontSize: 17,
     fontWeight: '700',
     paddingRight: 8,
   },
   status: {
-    color: '#175cd3',
+    color: '#247D67',
     fontSize: 12,
     fontWeight: '600',
   },
   cardMeta: {
-    color: '#667085',
+    color: '#697871',
     fontSize: 12,
   },
   bodyText: {
-    color: '#344054',
+    color: '#45564E',
     fontSize: 15,
     lineHeight: 22,
   },
   input: {
-    backgroundColor: '#fff',
-    borderColor: '#d0d5dd',
-    borderRadius: 9,
+    backgroundColor: '#F8FAF9',
+    borderColor: '#D8E2DC',
+    borderRadius: 13,
     borderWidth: 1,
-    color: '#101828',
+    color: '#24372F',
     fontSize: 16,
-    minHeight: 48,
-    paddingHorizontal: 13,
+    minHeight: 52,
+    paddingHorizontal: 15,
   },
   multilineInput: {
     minHeight: 120,
     paddingTop: 13,
   },
   label: {
-    color: '#344054',
+    color: '#344A40',
     fontSize: 15,
     fontWeight: '600',
     marginTop: 5,
@@ -1903,32 +2986,32 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   choice: {
-    backgroundColor: '#fff',
-    borderColor: '#d0d5dd',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#D8E2DC',
     borderRadius: 20,
     borderWidth: 1,
     paddingHorizontal: 13,
     paddingVertical: 9,
   },
   selectedChoice: {
-    backgroundColor: '#eff4ff',
-    borderColor: '#155eef',
+    backgroundColor: '#E5F4ED',
+    borderColor: '#247D67',
   },
   choiceText: {
-    color: '#344054',
+    color: '#344A40',
     fontSize: 14,
   },
   primaryButton: {
     alignItems: 'center',
-    backgroundColor: '#155eef',
-    borderRadius: 9,
+    backgroundColor: '#167D68',
+    borderRadius: 13,
     justifyContent: 'center',
-    minHeight: 48,
+    minHeight: 52,
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
   primaryButtonText: {
-    color: '#fff',
+    color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
   },
@@ -1936,16 +3019,16 @@ const styles = StyleSheet.create({
     opacity: 0.55,
   },
   dangerButton: {
-    backgroundColor: '#fff',
-    borderColor: '#fda29b',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FDA29B',
   },
   dangerButtonText: {
-    color: '#b42318',
+    color: '#B42318',
   },
   adminCard: {
-    backgroundColor: '#f8fafc',
-    borderColor: '#eaecf0',
-    borderRadius: 8,
+    backgroundColor: '#F5F8F6',
+    borderColor: '#E2EAE5',
+    borderRadius: 13,
     borderWidth: 1,
     marginBottom: 8,
     padding: 10,
@@ -1957,8 +3040,8 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   subFormGroup: {
-    backgroundColor: '#fff',
-    borderColor: '#d0d5dd',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#D8E2DC',
     borderRadius: 8,
     borderWidth: 1,
     marginTop: 10,
@@ -1966,15 +3049,15 @@ const styles = StyleSheet.create({
   },
   outlineButton: {
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderColor: '#d0d5dd',
-    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    borderColor: '#D8E2DC',
+    borderRadius: 11,
     borderWidth: 1,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
   outlineButtonText: {
-    color: '#344054',
+    color: '#344A40',
     fontSize: 13,
     fontWeight: '600',
   },
@@ -1985,43 +3068,44 @@ const styles = StyleSheet.create({
   },
   evidenceImage: {
     alignSelf: 'flex-start',
-    borderRadius: 8,
+    borderRadius: 13,
     height: 190,
     marginTop: 4,
     width: '100%',
   },
   camera: {
-    borderRadius: 12,
+    borderRadius: 17,
     height: 300,
     overflow: 'hidden',
     width: '100%',
   },
   qrContainer: {
     alignItems: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
     padding: 18,
   },
   errorText: {
-    color: '#b42318',
+    color: '#B42318',
     fontSize: 14,
     lineHeight: 20,
     marginTop: 8,
   },
   helperText: {
-    color: '#667085',
+    color: '#697871',
     fontSize: 13,
     lineHeight: 19,
     marginTop: 12,
     textAlign: 'center',
   },
   emptyText: {
-    color: '#667085',
+    color: '#697871',
     fontSize: 15,
     paddingVertical: 20,
     textAlign: 'center',
   },
   linkText: {
-    color: '#155eef',
+    color: '#167D68',
     fontSize: 14,
     fontWeight: '600',
   },

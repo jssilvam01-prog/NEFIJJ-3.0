@@ -34,6 +34,11 @@ export async function createOrganizationInvitation(locationId) {
   return response.data;
 }
 
+export async function getOrganizationInvitationCode(invitationId) {
+  const response = await api.post(`/auth/organization-invitations/${invitationId}/reveal/`);
+  return response.data;
+}
+
 export async function revokeOrganizationInvitation(invitationId) {
   await api.post(`/auth/organization-invitations/${invitationId}/revoke/`);
 }
@@ -95,5 +100,26 @@ export async function createTechnician(account) {
 
 export async function setTechnicianStatus(userId, isActive) {
   const response = await api.patch(`/auth/technicians/${userId}/`, { is_active: isActive });
+  return response.data;
+}
+
+export async function resetTechnicianPassword(userId, newPassword, newPasswordConfirm) {
+  const response = await api.put(`/auth/technicians/${userId}/password/`, {
+    new_password: newPassword,
+    new_password_confirm: newPasswordConfirm,
+  });
+  return response.data;
+}
+
+export async function getOrganizationUsers() {
+  const response = await api.get('/auth/users/');
+  return response.data;
+}
+
+export async function resetOrganizationUserPassword(userId, newPassword, newPasswordConfirm) {
+  const response = await api.put(`/auth/users/${userId}/password/`, {
+    new_password: newPassword,
+    new_password_confirm: newPasswordConfirm,
+  });
   return response.data;
 }

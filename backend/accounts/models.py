@@ -2,6 +2,7 @@ from django.contrib.auth.base_user import AbstractBaseUser
 from django.contrib.auth.models import UserManager as DjangoUserManager
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import F, Q
 from django.utils.text import slugify
 
 
@@ -106,12 +107,25 @@ class User(AbstractBaseUser):
         if self.is_superuser:
             return 'superadmin'
 
-        membership_roles = set(
-            self.organization_memberships.filter(is_active=True).values_list('role', flat=True)
+        active_memberships = self.organization_memberships.filter(
+            is_active=True,
+            organization__status=Organization.Status.ACTIVE,
+        ).filter(
+            Q(location__isnull=True)
+            | Q(
+                location__is_active=True,
+                location__organization_id=F('organization_id'),
+            )
         )
-        if 'organization_admin' in membership_roles or self.role == self.Role.ADMIN:
+        if active_memberships.filter(
+            role=OrganizationMembership.Role.ORGANIZATION_ADMIN,
+        ).exists():
             return 'organization_admin'
-        if 'technician' in membership_roles or self.role == self.Role.TECHNICIAN:
+        if self.location_id and active_memberships.filter(
+            organization_id=self.location.organization_id,
+            location_id=self.location_id,
+            role=OrganizationMembership.Role.TECHNICIAN,
+        ).exists():
             return 'technician'
         return 'user'
 
@@ -186,6 +200,7 @@ class OrganizationInvitation(models.Model):
         related_name='created_organization_invitations',
     )
     token_hash = models.CharField(max_length=64, unique=True)
+    code_ciphertext = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     revoked_at = models.DateTimeField(null=True, blank=True)

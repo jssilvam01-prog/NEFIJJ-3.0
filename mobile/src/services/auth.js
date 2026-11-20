@@ -9,6 +9,13 @@ export async function login(username, password) {
   return response.data.user;
 }
 
+export async function registerWithInvitation(account) {
+  const response = await api.post('/auth/register/', account);
+  await storeAccessToken(response.data.access);
+  await SecureStore.setItemAsync('refresh_token', response.data.refresh);
+  return response.data.user;
+}
+
 export async function getProfile() {
   const response = await api.get('/auth/me/');
   return response.data;

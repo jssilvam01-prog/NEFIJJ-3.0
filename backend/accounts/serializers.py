@@ -1,5 +1,7 @@
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 
 from django.db import transaction
 from rest_framework import serializers
@@ -77,6 +79,15 @@ class ManagedAccountSerializer(serializers.ModelSerializer):
                 'location',
             ).all()
         ]
+
+
+class OrganizationUserSerializer(serializers.ModelSerializer):
+    location = serializers.CharField(source='location.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'location', 'is_active']
+        read_only_fields = fields
 
 
 class OrganizationAdminCreateSerializer(ManagedAccountSerializer):
@@ -314,13 +325,50 @@ class InvitationCreateSerializer(serializers.Serializer):
         return location
 
 
-class AdminPasswordResetSerializer(serializers.Serializer):
-    new_password = serializers.CharField(write_only=True, validators=[validate_password])
-    new_password_confirm = serializers.CharField(write_only=True, required=False)
+class InvitationRegistrationSerializer(serializers.Serializer):
+    code = serializers.CharField(max_length=128, trim_whitespace=True)
+    username = serializers.CharField(max_length=150)
+    email = serializers.EmailField()
+    first_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    last_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True, trim_whitespace=False)
+    password_confirm = serializers.CharField(write_only=True, trim_whitespace=False)
+
+    def validate_username(self, value):
+        if User.objects.filter(username=value).exists():
+            raise serializers.ValidationError('Este nombre de usuario ya está registrado.')
+        return value
+
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError('Este correo ya está registrado.')
+        return value
 
     def validate(self, attrs):
-        confirm = attrs.get('new_password_confirm')
-        if confirm and attrs['new_password'] != confirm:
+        if attrs['password'] != attrs['password_confirm']:
+            raise serializers.ValidationError({
+                'password_confirm': 'Las contraseñas no coinciden.',
+            })
+
+        candidate = User(
+            username=attrs['username'],
+            email=attrs['email'],
+            first_name=attrs.get('first_name', ''),
+            last_name=attrs.get('last_name', ''),
+        )
+        try:
+            validate_password(attrs['password'], user=candidate)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({'password': exc.messages}) from exc
+        return attrs
+
+
+class AdminPasswordResetSerializer(serializers.Serializer):
+    new_password = serializers.CharField(write_only=True, validators=[validate_password])
+    new_password_confirm = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['new_password_confirm']:
             raise serializers.ValidationError({'new_password_confirm': 'Las contraseñas no coinciden.'})
         return attrs
 
@@ -329,6 +377,7 @@ class OrganizationInvitationSerializer(serializers.ModelSerializer):
     organization_id = serializers.IntegerField(read_only=True)
     location_id = serializers.IntegerField(read_only=True)
     location_name = serializers.CharField(source='location.name', read_only=True)
+    can_reveal_code = serializers.SerializerMethodField()
 
     class Meta:
         model = OrganizationInvitation
@@ -341,6 +390,17 @@ class OrganizationInvitationSerializer(serializers.ModelSerializer):
             'expires_at',
             'revoked_at',
             'used_at',
+            'can_reveal_code',
         ]
         read_only_fields = fields
+
+    def get_can_reveal_code(self, invitation):
+        return bool(
+            invitation.code_ciphertext
+            and invitation.revoked_at is None
+            and invitation.used_at is None
+            and invitation.expires_at > timezone.now()
+            and invitation.organization.status == Organization.Status.ACTIVE
+            and invitation.location.is_active
+        )
 

@@ -7,7 +7,8 @@ NEFIJJ utiliza una arquitectura cliente-servidor en capas:
 3. **Capa de Persistencia (MySQL / XAMPP):** Base de datos relacional **`nefijj_db`** corriendo en el puerto **3308** de XAMPP. Almacena las tablas de usuarios, sedes, membresías, categorías e incidencias, guardando las rutas relativas de las imágenes de evidencia.
 
 ## 2. Configuración de Base de Datos (`nefijj_db`)
-En el archivo ignorado `backend/.env`, la conexión se establece desde `backend/config/settings.py` para enlazarse con XAMPP:
+En el archivo ignorado `backend/.env`, la conexión se establece desde `backend/config/settings.py` para enlazarse con XAMPP. `DB_HOST` y `DB_PORT` deben coincidir con la instancia donde existe `nefijj_db`; el valor documentado para XAMPP es `127.0.0.1:3308`.
+
 ```python
 DATABASES = {
     'default': {
@@ -20,6 +21,8 @@ DATABASES = {
     }
 }
 ```
+
+Si Django informa `OperationalError (2002)` o que no puede conectarse a `127.0.0.1`, normalmente el servicio no está iniciado o el puerto de `.env` no coincide con el de MySQL. Inicia la instancia correcta y comprueba el puerto con `Test-NetConnection 127.0.0.1 -Port 3308` (ajústalo al puerto configurado). No cambies a otra instalación/puerto sin confirmar que contiene la base institucional. El modo SQLite se reserva a pruebas y no se activa como fallback. No ejecutes migraciones en la base legado sin aprobarlas.
 
 ## 3. Funcionamiento con Expo Go (QR e IP Local)
 Durante el desarrollo móvil, **Expo Go** no requiere la compilación previa de un archivo APK nativo. Funciona mediante un servidor Metro bundler que emite el código JavaScript de la aplicación.
@@ -39,8 +42,8 @@ El QR de desarrollo de Expo Go solo carga la aplicación. La invitación QR inst
 Las consultas y escrituras de incidencias validan membresía activa, organización activa y sede activa en el servidor:
 
 - `user`: solo sus propios reportes de su sede activa.
-- `technician`: incidencias de su sede activa; actualiza solo las asignadas a su cuenta y sigue `pendiente` → `en_proceso` → `resuelto`.
-- `organization_admin`: todas las incidencias de las organizaciones activas donde tenga membresía administrativa.
+- `technician`: incidencias de su sede activa; actualiza solo las asignadas a su cuenta y sigue `pendiente` → `en_proceso` → `resuelto` (`en_proceso` se muestra como “En reparación”).
+- `organization_admin`: consulta las incidencias de sus organizaciones activas y asigna/reasigna cada una a un técnico activo de la misma sede; no cambia el estado.
 - `superadmin`: lectura global de incidencias; no puede crear, asignar ni cambiar su estado. Administra organizaciones desde el endpoint de organizaciones.
 
 Las evidencias viajan por `multipart/form-data`; DRF/Pillow valida el archivo y Django lo guarda en `backend/media/evidences/`. Se sirven mediante `GET /api/v1/incidents/{id}/evidence/`, que reutiliza el queryset de permisos de incidencias; no se publican desde una ruta estática de `MEDIA_URL`. Los filtros de consulta no confían en un `organization_id` enviado por el cliente.
@@ -55,8 +58,19 @@ Las evidencias viajan por `multipart/form-data`; DRF/Pillow valida el archivo y 
 - `POST /api/v1/locations/` y `PATCH /api/v1/locations/{id}/`: el administrador crea y activa/desactiva sedes de su tenant.
 - `GET|POST /api/v1/auth/organization-admins/`: el superadministrador administra las cuentas administrativas por organización.
 - `GET|POST /api/v1/auth/technicians/`: el administrador crea cuentas técnicas con una sede asignada.
+- `PUT /api/v1/auth/technicians/{id}/password/` y `PUT /api/v1/auth/users/{id}/password/`: el administrador restablece una contraseña con alcance limitado a sus sedes; `GET /api/v1/auth/users/` lista sus usuarios con membresía activa.
 - `POST|PATCH /api/v1/categories/`: el administrador mantiene categorías de su organización.
 - `/api/v1/categories/{id}/routes/`: configuración por sede del técnico que recibe automáticamente las incidencias de la categoría.
 - `/api/v1/organizations/`: superadministrador crea, lista, activa y suspende organizaciones.
+- `PATCH /api/v1/incidents/{id}/`: el administrador asigna un técnico activo de la misma sede mediante `assigned_to`; solo el técnico asignado cambia `status`.
 
 Las migraciones que agregan `accounts_organizationinvitation` y `incidents_categorytechnician` se prueban con SQLite temporal, pero no se han aplicado a `nefijj_db`. La base MySQL existente no debe migrarse hasta revisar la compatibilidad con el esquema legado y aprobar la operación. Protocolos y alertas siguen en desarrollo.
+
+## 6. Atención de incidencias implementada
+
+- Notificaciones dentro de la app al técnico asignado y al reportante; push queda fuera de esta fase.
+- Historial visible de creación, asignaciones/reasignaciones y cambios de estado con actor y fecha.
+- Nota de resolución obligatoria y fotografía final opcional del técnico asignado.
+- SLA de horas corridas desde la creación: crítica 4 h, alta 8 h, media 24 h y baja 72 h.
+
+La migración `incidents.0003_incident_resolution_image_incident_resolution_note_and_more` se probó en SQLite y se aplicó a la base local `nefijj_db` después de adaptar las referencias a las claves `INT` existentes. Para otra base legado, primero se debe revisar y aprobar el plan de migración.

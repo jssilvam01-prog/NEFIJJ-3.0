@@ -1,7 +1,9 @@
 import mimetypes
 
+from django.db import transaction
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
@@ -14,11 +16,19 @@ from accounts.tenancy import (
     active_organization_admin_ids,
     has_active_location_membership,
 )
-from .models import Category, CategoryTechnician, Incident, IncidentEvent
+from .models import (
+    Category,
+    CategoryTechnician,
+    Incident,
+    IncidentEvent,
+    IncidentNotification,
+)
 from .serializers import (
     CategorySerializer,
     CategoryTechnicianSerializer,
+    IncidentAssignmentSerializer,
     IncidentCreateSerializer,
+    IncidentNotificationSerializer,
     IncidentReadSerializer,
     IncidentStatusSerializer,
 )
@@ -31,7 +41,7 @@ def incidents_visible_to(user):
         'category',
         'reported_by',
         'assigned_to',
-    )
+    ).prefetch_related('events__actor')
     role = user.effective_role
     if role == 'superadmin':
         return incidents
@@ -92,6 +102,8 @@ class CategoryViewSet(viewsets.ModelViewSet):
             )
         return categories.none()
 
+    @transaction.atomic
+    @transaction.atomic
     def perform_create(self, serializer):
         if self.request.user.effective_role != 'organization_admin':
             raise PermissionDenied('Solo un administrador puede crear categorías.')
@@ -184,6 +196,8 @@ class IncidentViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return IncidentCreateSerializer
         if self.action in {'update', 'partial_update'}:
+            if self.request.user.effective_role == 'organization_admin':
+                return IncidentAssignmentSerializer
             return IncidentStatusSerializer
         return IncidentReadSerializer
 
@@ -218,26 +232,121 @@ class IncidentViewSet(viewsets.ModelViewSet):
             event_type=IncidentEvent.EventType.CREATED,
             new_value={'status': incident.status},
         )
+        if incident.assigned_to_id:
+            event = IncidentEvent.objects.create(
+                incident=incident,
+                actor=user,
+                event_type=IncidentEvent.EventType.ASSIGNED,
+                new_value={
+                    'technician_id': incident.assigned_to_id,
+                    'technician': incident.assigned_to.username,
+                    'automatic': True,
+                },
+            )
+            notify_incident_user(
+                event,
+                incident.assigned_to,
+                f'Te asignaron la incidencia: {incident.title}.',
+            )
 
+    @transaction.atomic
     def perform_update(self, serializer):
         user = self.request.user
         incident = serializer.instance
         role = user.effective_role
-        if role == 'technician' and incident.assigned_to_id != user.pk:
-            raise PermissionDenied('Solo puedes actualizar incidencias asignadas a ti.')
-        if role not in {'technician', 'organization_admin'}:
+        if role == 'technician':
+            if 'assigned_to' in self.request.data:
+                raise PermissionDenied('Solo el administrador puede asignar técnicos.')
+            if incident.assigned_to_id != user.pk:
+                raise PermissionDenied('Solo puedes actualizar incidencias asignadas a ti.')
+        elif role == 'organization_admin':
+            if 'status' in self.request.data:
+                raise PermissionDenied('Solo el técnico asignado puede actualizar el estado.')
+            if 'assigned_to' not in serializer.validated_data:
+                raise ValidationError({'assigned_to': 'Selecciona el técnico de esta incidencia.'})
+        else:
             raise PermissionDenied('No tienes permiso para actualizar esta incidencia.')
 
         old_status = incident.status
+        old_assigned_to = incident.assigned_to
         updated_incident = serializer.save()
+        if old_assigned_to != updated_incident.assigned_to:
+            event = IncidentEvent.objects.create(
+                incident=updated_incident,
+                actor=user,
+                event_type=IncidentEvent.EventType.ASSIGNED,
+                old_value={
+                    'technician_id': old_assigned_to.pk,
+                    'technician': old_assigned_to.username,
+                } if old_assigned_to else None,
+                new_value={
+                    'technician_id': updated_incident.assigned_to_id,
+                    'technician': updated_incident.assigned_to.username,
+                } if updated_incident.assigned_to else None,
+            )
+            if updated_incident.assigned_to:
+                notify_incident_user(
+                    event,
+                    updated_incident.assigned_to,
+                    f'Te asignaron la incidencia: {updated_incident.title}.',
+                )
         if old_status != updated_incident.status:
-            IncidentEvent.objects.create(
+            event = IncidentEvent.objects.create(
                 incident=updated_incident,
                 actor=user,
                 event_type=IncidentEvent.EventType.STATUS_CHANGED,
                 old_value={'status': old_status},
-                new_value={'status': updated_incident.status},
+                new_value={
+                    'status': updated_incident.status,
+                    **(
+                        {'resolution_note': updated_incident.resolution_note}
+                        if updated_incident.status == Incident.Status.RESOLVED
+                        else {}
+                    ),
+                },
             )
+            notify_incident_user(
+                event,
+                updated_incident.reported_by,
+                f'La incidencia {updated_incident.title} cambió a {updated_incident.get_status_display()}.',
+            )
+
+
+def notify_incident_user(event, recipient, message):
+    IncidentNotification.objects.create(
+        recipient=recipient,
+        incident=event.incident,
+        event=event,
+        message=message,
+    )
+
+
+class IncidentNotificationListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        notifications = IncidentNotification.objects.filter(
+            recipient=request.user,
+            incident__in=incidents_visible_to(request.user),
+        ).select_related('incident', 'event').order_by('-created_at')[:100]
+        return Response(IncidentNotificationSerializer(notifications, many=True).data)
+
+
+class IncidentNotificationReadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        notification = get_object_or_404(
+            IncidentNotification.objects.filter(
+                recipient=request.user,
+                incident__in=incidents_visible_to(request.user),
+            ).select_related('incident', 'event'),
+            pk=pk,
+        )
+        if notification.read_at is None:
+            notification.read_at = timezone.now()
+            notification.save(update_fields=['read_at'])
+        return Response(IncidentNotificationSerializer(notification).data)
 
 
 class QueryParamJWTAuthentication(JWTAuthentication):
@@ -258,13 +367,16 @@ class IncidentEvidenceView(APIView):
 
     def get(self, request, pk):
         incident = get_object_or_404(incidents_visible_to(request.user), pk=pk)
-        if not incident.evidence_image or not incident.evidence_image.storage.exists(
-            incident.evidence_image.name,
-        ):
+        image_kind = request.query_params.get('kind', 'evidence')
+        image = {
+            'evidence': incident.evidence_image,
+            'resolution': incident.resolution_image,
+        }.get(image_kind)
+        if not image or not image.storage.exists(image.name):
             raise Http404
         response = FileResponse(
-            incident.evidence_image.open('rb'),
-            content_type=mimetypes.guess_type(incident.evidence_image.name)[0] or 'application/octet-stream',
+            image.open('rb'),
+            content_type=mimetypes.guess_type(image.name)[0] or 'application/octet-stream',
         )
         response['Cache-Control'] = 'private, no-store'
         response['X-Content-Type-Options'] = 'nosniff'

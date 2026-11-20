@@ -29,13 +29,13 @@ nefijj/
 ## 3. Roles y Reglas de Negocio
 - **Cuentas y contraseñas:** Cada persona usa una cuenta individual. Las contraseñas no se guardan en Markdown, el repositorio, capturas ni logs.
 - **Aislamiento multi-tenant:** Cada solicitud valida la membresía activa y el estado activo de la organización y sede. El servidor filtra por `organization_id` y `location_id`; no confía en identificadores de tenant enviados por el cliente.
-- **Estudiante / Usuario (`user`):** Inicia sesión con su cuenta existente y luego escanea o ingresa un código de invitación para vincularse a una organización y sede. Solo crea incidencias con título, descripción, categoría, prioridad y evidencia fotográfica opcional; consulta exclusivamente sus propios reportes de la sede/organización activa.
-- **Técnico (`technician`):** Lo crea el administrador de su organización y queda asignado a una sede. Consulta todas las incidencias de esa sede, incluidas las evidencias, pero solo cambia incidencias asignadas a su cuenta y únicamente en el flujo `pendiente` → `en_proceso` → `resuelto`.
-- **Administrador de Organización (`organization_admin`):** Gestiona solo su organización activa, incluidas todas sus sedes e incidencias. Administra personal de soporte, categorías, sedes, protocolos y alertas operativas; genera y revoca invitaciones QR para estudiantes.
+- **Estudiante / Usuario (`user`):** Puede crear su cuenta desde el inicio con un QR/código de invitación, que la vincula a una organización y sede; las cuentas existentes conservan la opción de aceptar una invitación para vincularse. Solo crea incidencias con título, descripción, categoría, prioridad y evidencia fotográfica opcional; consulta exclusivamente sus propios reportes de la sede/organización activa.
+- **Técnico (`technician`):** Lo crea el administrador de su organización y queda asignado a una sede. Consulta todas las incidencias de esa sede, incluidas las evidencias, pero solo cambia incidencias asignadas a su cuenta y únicamente en el flujo `pendiente` → `en_proceso` → `resuelto` (`en_proceso` se presenta como “En reparación”).
+- **Administrador de Organización (`organization_admin`):** Gestiona solo su organización activa, incluidas sus sedes e incidencias. Puede asignar/reasignar cada incidencia a un técnico activo de su misma sede, pero no cambiar el estado. Administra personal, categorías y sedes, restablece contraseñas de técnicos/usuarios de sus sedes y genera/revoca invitaciones QR, que puede volver a mostrar o compartir mientras estén activas.
 - **Superadministrador (`superadmin`):** Tiene supervisión global y administra el ciclo de vida de organizaciones (crear, activar y suspender). Puede consultar incidencias globalmente, pero no realizar cambios operativos en ellas.
-- **Invitaciones QR:** El administrador selecciona una sede activa. El servidor genera un código aleatorio de un solo uso, almacena solo su hash y permite revocarlo. El código vence en siete días hábiles en la zona horaria `America/Bogota` (lunes a viernes; los festivos no se excluyen mientras no se configure un calendario institucional). El estudiante debe estar autenticado y tener una cuenta existente para aceptarlo. El QR no contiene contraseñas ni tokens JWT.
+- **Invitaciones QR:** El administrador selecciona una sede activa. El servidor genera un código aleatorio de un solo uso, almacena su hash y una copia cifrada para poder volver a mostrarlo o compartirlo mientras la invitación siga activa. El código vence en siete días hábiles en la zona horaria `America/Bogota` (lunes a viernes; los festivos no se excluyen mientras no se configure un calendario institucional). Una persona nueva puede usarlo para registrarse; una cuenta existente puede aceptarlo después de iniciar sesión. Las invitaciones anteriores sin copia cifrada deben reemplazarse. El QR no contiene contraseñas ni tokens JWT.
 - **Evidencias:** La API admite `multipart/form-data`; DRF/Pillow valida imágenes y las almacena bajo `backend/media/evidences/`, fuera de la base de datos. Se sirven solo por un endpoint autenticado que aplica los mismos filtros de tenant y rol que las incidencias.
-- **Cambio de contraseña:** La aplicación debe ofrecer una opción para cambiar o recuperar la contraseña desde el acceso mediante un flujo seguro de verificación de identidad, y para cambiarla desde el perfil de una sesión autenticada. El mecanismo de recuperación debe definirse antes de implementarlo. Desde el perfil, se debe solicitar la contraseña actual y confirmar la nueva.
+- **Cambio de contraseña:** Una persona autenticada cambia su propia contraseña desde Perfil indicando la contraseña actual y confirmando la nueva. El administrador de organización puede establecer una contraseña provisional para usuarios y técnicos de sus sedes; se recomienda que la persona la cambie desde Perfil. La recuperación desde la pantalla de acceso sigue pendiente y requiere verificación de identidad.
 
 ### Cuentas locales de referencia
 
@@ -55,13 +55,19 @@ Las contraseñas se configuran o restablecen de forma segura y no se guardan en 
 2. La imagen se guarda de forma segura en `backend/media/evidences/` y su ruta relativa se registra en la base de datos MySQL `nefijj_db`.
 3. El técnico y el administrador visualizan, al consultar la API, los reportes correspondientes a su sede/organización desde Expo Go y la IP LAN.
 4. Cada usuario accede con su propia cuenta y puede cambiar su contraseña; la recuperación segura sigue pendiente de definir.
-5. El usuario inicia sesión, acepta una invitación QR vigente y de un solo uso, y el servidor crea su membresía en la sede correspondiente.
+5. Una persona puede crear su cuenta con una invitación QR vigente de un solo uso y queda vinculada automáticamente a la sede; las cuentas existentes pueden aceptar invitaciones para vincularse.
 6. El superadministrador puede crear, activar y suspender organizaciones, pero sus permisos sobre incidencias son de solo lectura.
 
 ## 5. Estado de Implementación
 
 - Implementados y probados en SQLite temporal: aislamiento inicial por membresías/organizaciones/sedes activas, flujo de estado permitido, invitación QR con hash/uso único/revocación/vigencia, panel móvil de invitaciones y administración de organizaciones por superadmin.
 - Implementados: alta de administradores por superadmin; gestión de sedes y técnicos por administrador de organización; CRUD lógico de categorías y asignación automática de incidencias por técnico, categoría y sede desde la app móvil.
-- La migración para la tabla de invitaciones está generada, pero no se ha aplicado a `nefijj_db`; el flujo QR requiere aprobar y aplicar esa migración para operar con MySQL.
-- La migración `incidents.0002_categorytechnician_and_more` agrega la configuración de enrutamiento y tampoco se ha aplicado a `nefijj_db`.
+- Implementados: asignación/reasignación manual de incidencias a técnicos de la misma sede, actualización de estados solo por el técnico asignado y restablecimiento administrativo de contraseñas para técnicos y usuarios del tenant.
+- Implementados: notificaciones internas al técnico asignado y al reportante, historial de eventos, nota obligatoria/foto opcional al resolver y SLA horario por prioridad.
+- Implementado: registro público de usuarios con invitación QR/código de un solo uso, vinculación transaccional a la sede e inicio automático de sesión; la aceptación de invitación para cuentas existentes se conserva.
+- Las migraciones `accounts.0002_organization_invitation`, `incidents.0002_categorytechnician_and_more` e `incidents.0003_incident_resolution_image_incident_resolution_note_and_more` están probadas en SQLite y aplicadas a la base local `nefijj_db`, tras revisar la compatibilidad con sus claves `INT`.
 - Pendiente: protocolos, alertas operativas, recuperación segura de contraseña y validación física con Expo Go.
+
+## 6. Funciones de incidencias completadas
+
+Notificaciones internas, historial de atención, nota obligatoria/foto opcional al resolver y SLA de 4/8/24/72 horas corridas están implementados. Push no forma parte del alcance. Antes de aplicar estas migraciones a otra base, hay que revisar su esquema y el plan de migración.

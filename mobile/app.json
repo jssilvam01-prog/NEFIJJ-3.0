@@ -15,7 +15,11 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "package": "com.jesu24.nefijj"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -29,6 +33,11 @@
           "recordAudioAndroid": false
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "11877d7d-3d5e-49f0-9a50-eb3bb17d911f"
+      }
+    }
   }
 }

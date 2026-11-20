@@ -27,6 +27,8 @@ from incidents.views import (
     CategoryTechnicianRoutesView,
     CategoryViewSet,
     IncidentEvidenceView,
+    IncidentNotificationListView,
+    IncidentNotificationReadView,
     IncidentViewSet,
 )
 
@@ -53,6 +55,16 @@ urlpatterns = [
         'api/v1/incidents/<int:pk>/evidence/',
         IncidentEvidenceView.as_view(),
         name='incident-evidence',
+    ),
+    path(
+        'api/v1/notifications/',
+        IncidentNotificationListView.as_view(),
+        name='incident-notifications',
+    ),
+    path(
+        'api/v1/notifications/<int:pk>/read/',
+        IncidentNotificationReadView.as_view(),
+        name='incident-notification-read',
     ),
         path('api/v1/', include(router.urls)),
 ]

@@ -5,6 +5,16 @@ export async function getIncidents() {
   return response.data;
 }
 
+export async function getIncidentNotifications() {
+  const response = await api.get('/notifications/');
+  return response.data;
+}
+
+export async function markIncidentNotificationRead(notificationId) {
+  const response = await api.post(`/notifications/${notificationId}/read/`);
+  return response.data;
+}
+
 export async function getCategories() {
   const response = await api.get('/categories/');
   return response.data;
@@ -59,7 +69,30 @@ export async function createIncident(incident) {
   return response.data;
 }
 
-export async function updateIncidentStatus(incidentId, status) {
-  const response = await api.patch(`/incidents/${incidentId}/`, { status });
+export async function updateIncidentStatus(incidentId, status, resolutionNote, resolutionImage) {
+  let data = { status };
+  let headers;
+  if (status === 'resuelto') {
+    data.resolution_note = resolutionNote;
+  }
+  if (resolutionImage) {
+    const formData = new FormData();
+    Object.entries(data).forEach(([key, value]) => formData.append(key, value));
+    formData.append('resolution_image', {
+      uri: resolutionImage.uri,
+      name: resolutionImage.fileName || 'resolution.jpg',
+      type: resolutionImage.mimeType || 'image/jpeg',
+    });
+    data = formData;
+    headers = { 'Content-Type': 'multipart/form-data' };
+  }
+  const response = await api.patch(`/incidents/${incidentId}/`, data, { headers });
+  return response.data;
+}
+
+export async function assignIncidentTechnician(incidentId, technicianId) {
+  const response = await api.patch(`/incidents/${incidentId}/`, {
+    assigned_to: technicianId,
+  });
   return response.data;
 }

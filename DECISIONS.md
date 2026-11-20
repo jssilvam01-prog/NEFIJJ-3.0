@@ -36,9 +36,9 @@ Decisión: El superadministrador administra el estado de las organizaciones y co
 
 Por qué: Separa la administración de la plataforma de la operación diaria de cada inquilino.
 
-7. Migración de invitaciones pendiente para MySQL
+7. Migraciones para el esquema MySQL legado
 
-Decisión: Generar y probar la migración de `OrganizationInvitation` en SQLite temporal, sin aplicarla a la base MySQL existente hasta revisar compatibilidad y aprobarla.
+Decisión: Probar migraciones en SQLite y aplicarlas a MySQL solo tras revisar compatibilidad con el esquema legado y aprobar el plan. Estado: `accounts.0002`, `incidents.0002` e `incidents.0003` están aplicadas a la base local `nefijj_db`; las claves foráneas nuevas usan `INT` para coincidir con las claves primarias existentes.
 
 Por qué: `nefijj_db` contiene un esquema legado y una migración directa podría alterar datos/tablas existentes.
 
@@ -53,3 +53,39 @@ Por qué: La URL de un archivo no debe permitir eludir el aislamiento entre estu
 Decisión: Permitir que el superadministrador cambie la contraseña y elimine cuentas de administradores de organización (`organization_admin`). La eliminación limpia referencias protegidas transaccionalmente e impide eliminar cuentas de superadministradores o a sí mismo.
 
 Por qué: Permite al operador global gestionar íntegramente a los administradores de tenant respetando la integridad referencial.
+
+10. Sin fallback automático de MySQL a SQLite
+
+Decisión: Django usa la base de datos indicada en `backend/.env`; para XAMPP, el puerto documentado es `3308`. No se cambia automáticamente a SQLite si MySQL no está disponible. SQLite queda reservado para las pruebas temporales mediante `DJANGO_USE_SQLITE=1`.
+
+Por qué: Un fallback silencioso podría iniciar la aplicación con una base vacía y ocultar que los datos institucionales están en otra instancia o puerto. Ante un error de conexión, primero se debe iniciar la instancia MySQL/MariaDB correcta y verificar host, puerto y credenciales, sin migrar la base legado.
+
+11. Asignación y atención de incidencias
+
+Decisión: El administrador de organización puede asignar o reasignar una incidencia a un técnico activo de la misma sede. Las reglas existentes de categoría y sede pueden asignar un técnico inicialmente; el administrador puede cambiar esa asignación. Solo el técnico asignado actualiza el estado en el orden `pendiente` → `en_proceso` → `resuelto`; el panel muestra `en_proceso` como “En reparación”.
+
+Por qué: Mantiene el enrutamiento configurado como ayuda inicial, pero permite que el administrador ajuste cada caso y reserva la atención/cierre al técnico responsable.
+
+12. Restablecimiento administrativo de contraseñas
+
+Decisión: El administrador puede establecer una contraseña provisional para técnicos y usuarios vinculados a sus sedes activas, sin consultar ni recibir la contraseña anterior. El sistema valida y almacena el hash; se recomienda que la persona la cambie desde su perfil. El acceso no requiere una migración de base de datos.
+
+Por qué: Permite recuperar el acceso sin exponer credenciales existentes ni conceder a un administrador control sobre cuentas de otra organización.
+
+13. Notificaciones dentro de la aplicación
+
+Decisión: La primera versión tendrá notificaciones dentro de la app: el técnico recibe aviso al asignársele una incidencia y el reportante recibe avisos de cambio de estado. No se implementan push en esta fase.
+
+Por qué: Entrega alertas en Expo Go sin depender de credenciales de un servicio push externo.
+
+14. SLA por prioridad en horas corridas
+
+Decisión: Los vencimientos iniciales son crítica 4 horas, alta 8 horas, media 24 horas y baja 72 horas desde la creación. El reloj corre continuamente, incluidos noches, fines de semana y festivos. La nota de resolución será obligatoria; la foto final será opcional.
+
+Por qué: Define un criterio inicial sencillo y verificable para la presentación. Los tiempos pueden revisarse con la organización antes de producción.
+
+15. Registro de usuarios con invitación QR
+
+Decisión: Desde la pantalla de acceso, una persona nueva puede ingresar o escanear un código vigente para crear su cuenta y vincularla a la sede indicada. La invitación se consume en la misma transacción; las cuentas existentes conservan el flujo autenticado de vinculación. La nueva cuenta se inicia como usuario (`user`), nunca como técnico ni administrador.
+
+Por qué: Permite que las organizaciones incorporen usuarios sin habilitar registros abiertos ni permitir elegir libremente un tenant.

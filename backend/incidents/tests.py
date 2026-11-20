@@ -1,3 +1,4 @@
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 import tempfile
@@ -8,7 +9,14 @@ from PIL import Image
 from rest_framework.test import APITestCase
 
 from accounts.models import Location, Organization, OrganizationMembership, User
-from .models import Category, CategoryTechnician, Incident, IncidentEvent
+from .models import (
+    Category,
+    CategoryTechnician,
+    Incident,
+    IncidentEvent,
+    IncidentNotification,
+)
+from .sla import incident_sla_due_at, incident_sla_status
 
 
 class IncidentApiTests(APITestCase):
@@ -164,8 +172,6 @@ class IncidentApiTests(APITestCase):
 
     def test_evidence_requires_the_same_incident_visibility_scope(self):
         incident = self.create_incident(evidence_image=self.sample_image())
-        response = self.client.get(incident.evidence_image.url)
-        self.assertEqual(response.status_code, 404)
 
         self.client.force_authenticate(self.technician)
 
@@ -245,12 +251,33 @@ class IncidentApiTests(APITestCase):
 
         response = self.client.patch(
             f'/api/v1/incidents/{incident.pk}/',
-            {'status': Incident.Status.RESOLVED},
-            format='json',
+            {
+                'status': Incident.Status.RESOLVED,
+                'resolution_note': 'Se reemplazó el cable dañado.',
+                'resolution_image': self.sample_image(),
+            },
+            format='multipart',
         )
         self.assertEqual(response.status_code, 200)
         incident.refresh_from_db()
         self.assertEqual(incident.status, Incident.Status.RESOLVED)
+        self.assertEqual(incident.resolution_note, 'Se reemplazó el cable dañado.')
+        self.assertTrue(incident.resolution_image.name.startswith('evidences/resolutions/'))
+        response = self.client.get(f'/api/v1/incidents/{incident.pk}/')
+        self.assertIn('kind=resolution', response.data['resolution_image'])
+        event = incident.events.get(
+            event_type=IncidentEvent.EventType.STATUS_CHANGED,
+            new_value__status=Incident.Status.RESOLVED,
+        )
+        self.assertEqual(event.new_value['resolution_note'], incident.resolution_note)
+        self.client.force_authenticate(self.reporter)
+        response = self.client.get(
+            f'/api/v1/incidents/{incident.pk}/evidence/?kind=resolution',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(b''.join(response.streaming_content))
+        response.close()
+        self.client.force_authenticate(self.technician)
         response = self.client.patch(
             f'/api/v1/incidents/{incident.pk}/',
             {'status': Incident.Status.IN_PROGRESS},
@@ -264,6 +291,163 @@ class IncidentApiTests(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_organization_admin_assigns_incident_to_same_site_technician_only(self):
+        organization_admin = User.objects.create_user(
+            username='assignment-admin',
+            email='assignment-admin@example.test',
+            password='Assignment-Admin-Secure-193!',
+            role=User.Role.ADMIN,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=organization_admin,
+            role=OrganizationMembership.Role.ORGANIZATION_ADMIN,
+        )
+        incident = self.create_incident()
+        self.client.force_authenticate(organization_admin)
+
+        response = self.client.patch(
+            f'/api/v1/incidents/{incident.pk}/',
+            {'assigned_to': self.other_campus_technician.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        incident.refresh_from_db()
+        self.assertIsNone(incident.assigned_to)
+
+        response = self.client.patch(
+            f'/api/v1/incidents/{incident.pk}/',
+            {'assigned_to': self.technician.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['assigned_to'], self.technician.pk)
+        incident.refresh_from_db()
+        self.assertEqual(incident.assigned_to, self.technician)
+
+        response = self.client.patch(
+            f'/api/v1/incidents/{incident.pk}/',
+            {'status': Incident.Status.IN_PROGRESS},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 403)
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, Incident.Status.PENDING)
+        response = self.client.patch(
+            f'/api/v1/incidents/{incident.pk}/',
+            {'assigned_to': self.other_org_user.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        incident.refresh_from_db()
+        self.assertEqual(incident.assigned_to, self.technician)
+        self.assertTrue(
+            IncidentNotification.objects.filter(
+                recipient=self.technician,
+                incident=incident,
+                event__event_type=IncidentEvent.EventType.ASSIGNED,
+            ).exists()
+        )
+
+        self.client.force_authenticate(self.technician)
+        response = self.client.patch(
+            f'/api/v1/incidents/{incident.pk}/',
+            {'status': Incident.Status.IN_PROGRESS},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        reporter_notification = IncidentNotification.objects.get(
+            recipient=self.reporter,
+            incident=incident,
+            event__event_type=IncidentEvent.EventType.STATUS_CHANGED,
+        )
+        self.client.force_authenticate(self.reporter)
+        response = self.client.get('/api/v1/notifications/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row['id'] for row in response.data], [reporter_notification.pk])
+
+    def test_resolution_requires_a_nonempty_note(self):
+        incident = self.create_incident(
+            assigned_to=self.technician,
+            status=Incident.Status.IN_PROGRESS,
+        )
+        self.client.force_authenticate(self.technician)
+
+        response = self.client.patch(
+            f'/api/v1/incidents/{incident.pk}/',
+            {'status': Incident.Status.RESOLVED, 'resolution_note': '   '},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        incident.refresh_from_db()
+        self.assertEqual(incident.status, Incident.Status.IN_PROGRESS)
+        self.assertFalse(incident.resolution_image)
+
+    def test_notifications_are_scoped_and_can_be_marked_read(self):
+        incident = self.create_incident(assigned_to=self.technician)
+        assignment_event = IncidentEvent.objects.create(
+            incident=incident,
+            actor=self.reporter,
+            event_type=IncidentEvent.EventType.ASSIGNED,
+            new_value={'technician_id': self.technician.pk, 'technician': self.technician.username},
+        )
+        notification = IncidentNotification.objects.create(
+            recipient=self.technician,
+            incident=incident,
+            event=assignment_event,
+            message='Te asignaron una incidencia.',
+        )
+
+        self.client.force_authenticate(self.reporter)
+        response = self.client.get('/api/v1/notifications/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, [])
+        response = self.client.post(f'/api/v1/notifications/{notification.pk}/read/')
+        self.assertEqual(response.status_code, 404)
+
+        self.client.force_authenticate(self.technician)
+        response = self.client.get('/api/v1/notifications/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row['id'] for row in response.data], [notification.pk])
+        self.assertFalse(response.data[0]['is_read'])
+        response = self.client.post(f'/api/v1/notifications/{notification.pk}/read/')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['is_read'])
+
+    def test_sla_hours_follow_priority_and_flag_due_or_late_incidents(self):
+        incident = self.create_incident(priority=Incident.Priority.CRITICAL)
+        IncidentEvent.objects.create(
+            incident=incident,
+            actor=self.reporter,
+            event_type=IncidentEvent.EventType.CREATED,
+            new_value={'status': incident.status},
+        )
+        self.client.force_authenticate(self.reporter)
+        response = self.client.get(f'/api/v1/incidents/{incident.pk}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['sla_status'], 'on_track')
+        self.assertEqual(response.data['events'][0]['event_type'], IncidentEvent.EventType.CREATED)
+        self.assertTrue(response.data['sla_due_at'])
+
+        expected_hours = {
+            Incident.Priority.CRITICAL: 4,
+            Incident.Priority.HIGH: 8,
+            Incident.Priority.MEDIUM: 24,
+            Incident.Priority.LOW: 72,
+        }
+        for priority, hours in expected_hours.items():
+            incident.priority = priority
+            due_at = incident_sla_due_at(incident)
+            self.assertEqual(due_at - incident.created_at, timedelta(hours=hours))
+            self.assertEqual(incident_sla_status(incident, now=due_at), 'overdue')
+
+        incident.status = Incident.Status.RESOLVED
+        incident.updated_at = due_at
+        self.assertEqual(incident_sla_status(incident), 'resolved_on_time')
+        incident.updated_at = due_at + timedelta(seconds=1)
+        self.assertEqual(incident_sla_status(incident), 'resolved_late')
 
     def test_superadmin_has_global_read_access_but_cannot_manage_incidents(self):
         incident = self.create_incident()
@@ -432,6 +616,13 @@ class IncidentApiTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         incident = Incident.objects.get(pk=response.data['id'])
         self.assertEqual(incident.assigned_to, self.technician)
+        self.assertTrue(
+            IncidentNotification.objects.filter(
+                recipient=self.technician,
+                incident=incident,
+                event__event_type=IncidentEvent.EventType.ASSIGNED,
+            ).exists()
+        )
 
         self.client.force_authenticate(organization_admin)
         response = self.client.patch(

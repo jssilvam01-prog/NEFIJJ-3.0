@@ -33,7 +33,7 @@ DEBUG = os.environ.get('DJANGO_DEBUG', 'False').lower() in {'true', '1', 'yes'}
 
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.environ.get('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
+    for host in os.environ.get('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost,192.168.1.2').split(',')
     if host.strip()
 ]
 
@@ -55,6 +55,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -62,6 +63,12 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get('DJANGO_CORS_ALLOWED_ORIGINS', '').split(',')
+    if origin.strip()
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -96,15 +103,19 @@ if os.environ.get('DJANGO_USE_SQLITE') == '1':
         }
     }
 else:
+    mysql_options = {'charset': 'utf8mb4'}
+    if os.environ.get('DB_SSL_CA'):
+        mysql_options['ssl'] = {'ca': os.environ['DB_SSL_CA']}
+
     DATABASES = {
         'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('DB_NAME', 'nefijj_db'),
-        'USER': os.environ.get('DB_USER', 'root'),
-        'PASSWORD': os.environ.get('DB_PASSWORD', ''),
-        'HOST': os.environ.get('DB_HOST', '127.0.0.1'),
-        'PORT': os.environ.get('DB_PORT', '3308'),
-        'OPTIONS': {'charset': 'utf8mb4'},
+            'ENGINE': 'django.db.backends.mysql',
+            'NAME': os.environ.get('DB_NAME', 'biblioteca_express'),
+            'USER': os.environ.get('DB_USER', 'root'),
+            'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+            'HOST': os.environ.get('DB_HOST', '127.0.0.1'),
+            'PORT': os.environ.get('DB_PORT', '3308'),
+            'OPTIONS': mysql_options,
         }
     }
 
@@ -155,6 +166,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 

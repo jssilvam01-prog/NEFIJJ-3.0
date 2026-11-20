@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from .invitation_tokens import add_business_days
+from .invitation_tokens import add_business_days, decrypt_invitation_code
 from .models import (
     Location,
     Organization,
@@ -12,6 +12,49 @@ from .models import (
     OrganizationMembership,
     User,
 )
+
+
+class EffectiveRoleTests(APITestCase):
+    def test_suspended_organization_does_not_grant_membership_roles(self):
+        organization = Organization.objects.create(name='Organización inactiva')
+        location = Location.objects.create(
+            organization=organization,
+            name='Sede inactiva',
+            code='ROLE-1',
+        )
+        technician = User.objects.create_user(
+            username='role-technician',
+            email='role-technician@example.test',
+            password='Role-Secure-193!',
+            role=User.Role.TECHNICIAN,
+            location=location,
+        )
+        OrganizationMembership.objects.create(
+            organization=organization,
+            location=location,
+            user=technician,
+            role=OrganizationMembership.Role.TECHNICIAN,
+        )
+        admin = User.objects.create_user(
+            username='role-admin',
+            email='role-admin@example.test',
+            password='Admin-Secure-193!',
+            role=User.Role.ADMIN,
+        )
+        OrganizationMembership.objects.create(
+            organization=organization,
+            user=admin,
+            role=OrganizationMembership.Role.ORGANIZATION_ADMIN,
+        )
+
+        self.assertEqual(technician.effective_role, 'technician')
+        self.assertEqual(admin.effective_role, 'organization_admin')
+
+        organization.status = Organization.Status.SUSPENDED
+        organization.save(update_fields=['status'])
+
+        self.assertEqual(technician.effective_role, 'user')
+        self.assertEqual(admin.effective_role, 'user')
 
 
 class PasswordChangeTests(APITestCase):
@@ -114,6 +157,9 @@ class OrganizationInvitationTests(APITestCase):
         invitation = OrganizationInvitation.objects.get(pk=response.data['id'])
         self.assertEqual(invitation.token_hash, hashlib.sha256(code.encode()).hexdigest())
         self.assertNotEqual(invitation.token_hash, code)
+        self.assertNotEqual(invitation.code_ciphertext, code)
+        self.assertEqual(decrypt_invitation_code(invitation.code_ciphertext), code)
+        self.assertTrue(response.data['can_reveal_code'])
         self.assertEqual(invitation.location, self.location)
         self.assertLess(
             invitation.expires_at.astimezone(ZoneInfo('America/Bogota')).weekday(),
@@ -152,6 +198,145 @@ class OrganizationInvitationTests(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_admin_can_reveal_the_same_code_until_invitation_is_used(self):
+        created = self.create_invitation()
+        invitation = OrganizationInvitation.objects.get(pk=created.data['id'])
+
+        response = self.client.post(
+            f'/api/v1/auth/organization-invitations/{invitation.pk}/reveal/',
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['code'], created.data['code'])
+        self.assertIn('no-store', response['Cache-Control'])
+        invitation.refresh_from_db()
+        self.assertIsNone(invitation.used_at)
+
+        invitation.expires_at = timezone.now()
+        invitation.save(update_fields=['expires_at'])
+        response = self.client.post(
+            f'/api/v1/auth/organization-invitations/{invitation.pk}/reveal/',
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_legacy_invitation_without_ciphertext_cannot_be_revealed(self):
+        created = self.create_invitation()
+        invitation = OrganizationInvitation.objects.get(pk=created.data['id'])
+        invitation.code_ciphertext = ''
+        invitation.save(update_fields=['code_ciphertext'])
+
+        response = self.client.post(
+            f'/api/v1/auth/organization-invitations/{invitation.pk}/reveal/',
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_public_registration_creates_user_and_consumes_invitation(self):
+        invitation_response = self.create_invitation()
+        code = invitation_response.data['code']
+        self.client.force_authenticate(None)
+
+        response = self.client.post(
+            '/api/v1/auth/register/',
+            {
+                'code': code,
+                'username': 'new-student',
+                'email': 'new-student@example.test',
+                'first_name': 'Nuevo',
+                'last_name': 'Usuario',
+                'password': 'Correct-Horse-Battery-992!',
+                'password_confirm': 'Correct-Horse-Battery-992!',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        student = User.objects.get(username='new-student')
+        self.assertTrue(student.check_password('Correct-Horse-Battery-992!'))
+        self.assertEqual(student.role, User.Role.STUDENT)
+        self.assertEqual(student.location, self.location)
+        self.assertTrue(
+            OrganizationMembership.objects.filter(
+                organization=self.organization,
+                location=self.location,
+                user=student,
+                role=OrganizationMembership.Role.USER,
+                is_active=True,
+            ).exists()
+        )
+        invitation = OrganizationInvitation.objects.get(pk=invitation_response.data['id'])
+        self.assertEqual(invitation.used_by, student)
+        self.assertIsNotNone(invitation.used_at)
+        self.assertEqual(response.data['user']['username'], student.username)
+        self.assertEqual(response.data['user']['role'], 'user')
+        self.assertTrue(response.data['access'])
+        self.assertTrue(response.data['refresh'])
+        self.assertNotIn('password', response.data)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        profile_response = self.client.get('/api/v1/auth/me/')
+        self.assertEqual(profile_response.status_code, 200)
+        self.assertEqual(profile_response.data['location_id'], self.location.pk)
+
+    def test_registration_rejects_invalid_or_reused_invitation_without_creating_accounts(self):
+        self.client.force_authenticate(None)
+        payload = {
+            'code': 'not-a-valid-code',
+            'username': 'first-registration',
+            'email': 'first-registration@example.test',
+            'password': 'Correct-Horse-Battery-992!',
+            'password_confirm': 'Correct-Horse-Battery-992!',
+        }
+        response = self.client.post('/api/v1/auth/register/', payload, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username=payload['username']).exists())
+
+        invitation_response = self.create_invitation()
+        payload['code'] = invitation_response.data['code']
+        response = self.client.post('/api/v1/auth/register/', payload, format='json')
+        self.assertEqual(response.status_code, 201)
+
+        payload['username'] = 'second-registration'
+        payload['email'] = 'second-registration@example.test'
+        response = self.client.post('/api/v1/auth/register/', payload, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username=payload['username']).exists())
+
+    def test_registration_requires_matching_policy_compliant_passwords(self):
+        invitation_response = self.create_invitation()
+        self.client.force_authenticate(None)
+        response = self.client.post(
+            '/api/v1/auth/register/',
+            {
+                'code': invitation_response.data['code'],
+                'username': 'weak-password-user',
+                'email': 'weak-password-user@example.test',
+                'password': 'weak',
+                'password_confirm': 'different',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post(
+            '/api/v1/auth/register/',
+            {
+                'code': invitation_response.data['code'],
+                'username': 'weak-password-user',
+                'email': 'weak-password-user@example.test',
+                'password': 'weak',
+                'password_confirm': 'weak',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username='weak-password-user').exists())
+        invitation = OrganizationInvitation.objects.get(pk=invitation_response.data['id'])
+        self.assertIsNone(invitation.used_at)
 
     def test_invitation_expires_after_seven_weekdays_and_can_be_revoked(self):
         response = self.create_invitation()
@@ -231,6 +416,11 @@ class OrganizationInvitationTests(APITestCase):
         self.assertEqual(response.data, [])
         response = self.client.post(
             f'/api/v1/auth/organization-invitations/{invitation_id}/revoke/',
+            format='json',
+        )
+        self.assertEqual(response.status_code, 404)
+        response = self.client.post(
+            f'/api/v1/auth/organization-invitations/{invitation_id}/reveal/',
             format='json',
         )
         self.assertEqual(response.status_code, 404)
@@ -522,3 +712,98 @@ class StaffManagementTests(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_admin_can_reset_passwords_only_for_accounts_in_its_tenant(self):
+        technician = User.objects.create_user(
+            username='reset-technician',
+            email='reset-technician@example.test',
+            password='Old-Technician-193!',
+            role=User.Role.TECHNICIAN,
+            location=self.location,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            location=self.location,
+            user=technician,
+            role=OrganizationMembership.Role.TECHNICIAN,
+        )
+        student = User.objects.create_user(
+            username='reset-student',
+            email='reset-student@example.test',
+            password='Old-Student-193!',
+            role=User.Role.STUDENT,
+            location=self.location,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            location=self.location,
+            user=student,
+            role=OrganizationMembership.Role.USER,
+        )
+        other_student = User.objects.create_user(
+            username='other-reset-student',
+            email='other-reset-student@example.test',
+            password='Old-Other-Student-193!',
+            role=User.Role.STUDENT,
+            location=self.other_location,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.other_organization,
+            location=self.other_location,
+            user=other_student,
+            role=OrganizationMembership.Role.USER,
+        )
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.get('/api/v1/auth/users/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row['id'] for row in response.data], [student.pk])
+
+        response = self.client.put(
+            f'/api/v1/auth/technicians/{technician.pk}/password/',
+            {
+                'new_password': 'Temporary-Technician-293!',
+                'new_password_confirm': 'Mismatch-Password-293!',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        technician.refresh_from_db()
+        self.assertTrue(technician.check_password('Old-Technician-193!'))
+
+        response = self.client.put(
+            f'/api/v1/auth/technicians/{technician.pk}/password/',
+            {
+                'new_password': 'Temporary-Technician-293!',
+                'new_password_confirm': 'Temporary-Technician-293!',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('password', response.data)
+        technician.refresh_from_db()
+        self.assertTrue(technician.check_password('Temporary-Technician-293!'))
+
+        response = self.client.put(
+            f'/api/v1/auth/users/{student.pk}/password/',
+            {
+                'new_password': 'Temporary-Student-293!',
+                'new_password_confirm': 'Temporary-Student-293!',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        student.refresh_from_db()
+        self.assertTrue(student.check_password('Temporary-Student-293!'))
+
+        response = self.client.put(
+            f'/api/v1/auth/users/{other_student.pk}/password/',
+            {
+                'new_password': 'Temporary-Other-Student-293!',
+                'new_password_confirm': 'Temporary-Other-Student-293!',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 404)
+        other_student.refresh_from_db()
+        self.assertTrue(other_student.check_password('Old-Other-Student-193!'))
